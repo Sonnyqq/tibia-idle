@@ -5,16 +5,16 @@ All stages start **NOT STARTED**; a roadmap line is not evidence of code. No mer
 ## P00 — repository governance (starter kit)
 - [x] Agent rules (`AGENTS.md`, `CLAUDE.md`), map, roadmap, architecture, test strategy, workflow, copyright notes.
 - [x] Runnable documentation and PL/EN key-parity checks; initial CI for these checks.
-- [ ] Initialize separate Git repository, branch protections, security settings, ownership, issue labels.
+- [x] Initialize separate Git repository (`Sonnyqq/tibia-idle`).
 - [ ] User decision: legal permission for third-party assets. No protected assets before written permission.
-**Exit:** rules, docs and docs/i18n CI pass on new repo. (Locally testable, not yet pushed.)
+**Exit:** rules, docs and docs/i18n CI pass on new repo.
 
 ## P01 — TypeScript skeleton + auth + localized UI
-- [x] Create pnpm workspace, pinned Node/package-manager, typecheck, lint, test commands (`IDLE-001`).
-- [ ] Real PostgreSQL schema, migrations, test DB, reset/seed and backup/restore procedure (`IDLE-002`).
-- [ ] Account registration/login/logout, security controls, character create/read, locale persisted (`IDLE-002`).
+- [x] Create pnpm workspace, pinned Node/package-manager, typecheck, lint, test commands (`IDLE-001`, merged in PR #1).
+- [x] Real PostgreSQL schema (`0002_auth_sessions_characters.sql`), versioned migrations, test DB reset (`IDLE-002`).
+- [x] Account registration/login/logout (Argon2id, hashed HttpOnly sessions, CSRF, rate limits), character create/read (max 3, 4 vocations), locale persisted (`IDLE-002`).
 - [ ] React responsive shell: bottom mobile nav, desktop layout, PL/EN switch, empty hunt panel (`IDLE-003`).
-- [ ] Unit, contract, DB integration, E2E register/login (desktop/mobile), auth abuse tests (`IDLE-002`/`IDLE-003`).
+- [x] Unit, contract, DB integration, E2E register/login/character (desktop/mobile), auth abuse & concurrency tests (`IDLE-002`).
 **Exit:** one user can register, change language and create a character; real CI regression.
 
 ## P02 — first vertical slice of idle hunts (HIGHEST RISK)

@@ -9,17 +9,17 @@
 | Product rules | `docs/GAME_DESIGN.md` | EXISTS | `docs/DATA_MODEL.md` | domain |
 | Architecture | `docs/ARCHITECTURE.md` | EXISTS | `docs/DECISIONS.md` | all |
 | Test gates | `docs/TEST_STRATEGY.md` | EXISTS | `docs/WORKFLOW.md` | all |
-| Locales & i18n | `packages/i18n/` | EXISTS (P01 scaffold) | `tests/tooling/i18n.test.mjs` | none |
+| Locales & i18n | `packages/i18n/` | EXISTS (PL/EN auth + character keys) | `tests/tooling/i18n.test.mjs` | none |
 | Documentation checks | `scripts/check-docs.mjs` | EXISTS | `tests/tooling/guardrails.test.mjs` | CI |
 | Architecture boundaries | `tests/tooling/boundaries.test.mjs` | EXISTS | `tsconfig.base.json` | CI |
-| Web UI | `apps/web/` | EXISTS (P01 scaffold) | game design: UI | contracts/i18n |
-| API/auth | `apps/api/` | EXISTS (P01 scaffold, auth in IDLE-002) | architecture: auth/API | domain/db/contracts/i18n |
-| Domain engine | `packages/domain/` | EXISTS (clock/RNG scaffold; mechanics P02+) | game design: hunts | contracts |
-| Database/migrations | `packages/database/` | EXISTS (pool/migration runner; auth schema IDLE-002) | data model | domain/contracts |
-| DTO/contracts | `packages/contracts/` | EXISTS (P01 scaffold) | architecture: API | i18n |
-| Unit smoke tests | `tests/unit/` | EXISTS (P01 scaffold) | `vitest.unit.config.ts` | packages/web |
-| Backend integration | `tests/integration/` | EXISTS (API + Postgres migration smoke) | `vitest.integration.config.ts` | api/db |
-| Browser E2E | `tests/e2e/` | EXISTS (PL/EN shell smoke) | `playwright.config.ts` | web/api |
+| Web UI | `apps/web/` | EXISTS (auth, character select/create, dashboard) | game design: UI | contracts/i18n |
+| API/auth | `apps/api/` | EXISTS (Argon2id auth, HttpOnly sessions, CSRF, characters) | architecture: auth/API | domain/db/contracts/i18n |
+| Domain engine | `packages/domain/` | EXISTS (vocation stats, name validation, clock/RNG; hunts P02+) | game design: hunts | contracts |
+| Database/migrations | `packages/database/` | EXISTS (`0001`+`0002` migrations, `auth-repository.ts`) | data model | domain/contracts |
+| DTO/contracts | `packages/contracts/` | EXISTS (auth, session, character DTOs/schemas) | architecture: API | i18n |
+| Unit tests | `tests/unit/` | EXISTS (domain, contracts, security, db, web, i18n) | `vitest.unit.config.ts` | packages/web/api |
+| Backend integration | `tests/integration/` | EXISTS (API, Postgres migrations, auth/security/race) | `vitest.integration.config.ts` | api/db |
+| Browser E2E | `tests/e2e/` | EXISTS (register -> login -> character -> dashboard -> logout) | `playwright.config.ts` | web/api/db |
 | Load and recovery | `tests/perf/` | PLANNED (P02+) | test strategy | api/db/domain |
 | Licensed art registry | `assets/` | EXISTS (rules only) | `docs/LEGAL_ASSETS.md` | web |
 | CI verification | `.github/workflows/verify.yml` | EXISTS | `docs/TEST_STRATEGY.md` | all tests |
