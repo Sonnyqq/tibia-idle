@@ -100,11 +100,7 @@ export type CharacterNameValidationResult =
 
 export function validateCharacterNameDomain(raw: string): CharacterNameValidationResult {
   const displayName = formatCharacterDisplayName(raw);
-  if (
-    displayName.length < 3 ||
-    displayName.length > 20 ||
-    !CHARACTER_NAME_PATTERN.test(displayName)
-  ) {
+  if (!displayName || !CHARACTER_NAME_PATTERN.test(displayName)) {
     return { ok: false, reason: 'INVALID_FORMAT' };
   }
 
@@ -118,6 +114,10 @@ export function validateCharacterNameDomain(raw: string): CharacterNameValidatio
     tokens.some((tok) => RESERVED_CHARACTER_NAMES.has(tok))
   ) {
     return { ok: false, reason: 'RESERVED_NAME' };
+  }
+
+  if (displayName.length < 3 || displayName.length > 20) {
+    return { ok: false, reason: 'INVALID_FORMAT' };
   }
 
   return {
