@@ -8,7 +8,8 @@ import {
 import {
   ApiErrorSchema,
   CharacterDtoSchema,
-  SessionMeResponseSchema
+  SessionMeResponseSchema,
+  ZonesCatalogResponseSchema
 } from '@tibia-idle/contracts';
 import {
   applyMigrations,
@@ -202,6 +203,24 @@ describe('Auth, Sessions & Characters PostgreSQL Integration, Security & Concurr
       expect(charA.stats.level).toBe(1);
       expect(charA.stats.hp).toBe(185);
       expect(charA.stats.melee).toBe(15);
+
+      // User A can read own character and zones catalog; unauthenticated /zones returns 401
+      const ownCharRes = await fetch(`${baseUrl}/characters/${charA.id}`, {
+        headers: { Cookie: `${SESSION_COOKIE_NAME}=${tokenA}` }
+      });
+      expect(ownCharRes.status).toBe(200);
+      expect(CharacterDtoSchema.parse(await ownCharRes.json()).name).toBe('Arthos');
+
+      const unauthZonesRes = await fetch(`${baseUrl}/zones`);
+      expect(unauthZonesRes.status).toBe(401);
+
+      const authZonesRes = await fetch(`${baseUrl}/zones`, {
+        headers: { Cookie: `${SESSION_COOKIE_NAME}=${tokenA}` }
+      });
+      expect(authZonesRes.status).toBe(200);
+      const zonesPayload = ZonesCatalogResponseSchema.parse(await authZonesRes.json());
+      expect(zonesPayload.simulationEnabled).toBe(false);
+      expect(zonesPayload.zones).toHaveLength(3);
 
       // IDOR check: User B must NOT access User A's character
       const idorRes = await fetch(`${baseUrl}/characters/${charA.id}`, {
