@@ -1,4 +1,9 @@
-import { type CharacterStatsDto, type VocationDto, VOCATIONS } from '@tibia-idle/contracts';
+import {
+  type CharacterStatsDto,
+  type VocationDto,
+  VOCATIONS,
+  type ZoneCatalogDto
+} from '@tibia-idle/contracts';
 
 export const SIMULATION_VERSION = '0.1.0' as const;
 
@@ -50,6 +55,241 @@ export const VOCATION_STARTING_CONFIG: Readonly<Record<VocationDto, VocationStar
     shielding: 10
   }
 } as const;
+
+export const INITIAL_ZONES_CATALOG: readonly ZoneCatalogDto[] = [
+  {
+    id: 'damp-catacombs',
+    nameKey: 'zone.sewersTitle',
+    enemyTypesKey: 'zone.sewersEnemies',
+    minLevel: 1,
+    recommendedLevelRange: '1 - 8',
+    expPerHourEstimate: null,
+    goldPerHourEstimate: null,
+    asset: {
+      assetId: 'zone.damp-catacombs',
+      category: 'zone',
+      fallbackIconKey: 'dungeon'
+    },
+    creatures: [
+      {
+        id: 'cellar-stalker',
+        nameKey: 'creature.cellarRat',
+        minLevel: 1,
+        dangerTier: 'low',
+        asset: {
+          assetId: 'creature.cellar-stalker',
+          category: 'creature',
+          fallbackIconKey: 'beast'
+        },
+        lootPreview: [
+          {
+            id: 'copper-coin',
+            nameKey: 'item.copperCoin',
+            rarity: 'common',
+            asset: { assetId: 'item.copper-coin', category: 'item', fallbackIconKey: 'coin' }
+          },
+          {
+            id: 'rat-pelt',
+            nameKey: 'item.ratPelt',
+            rarity: 'common',
+            asset: { assetId: 'item.rat-pelt', category: 'item', fallbackIconKey: 'pelt' }
+          }
+        ]
+      },
+      {
+        id: 'mire-carapace',
+        nameKey: 'creature.mireBeetle',
+        minLevel: 3,
+        dangerTier: 'low',
+        asset: {
+          assetId: 'creature.mire-carapace',
+          category: 'creature',
+          fallbackIconKey: 'carapace'
+        },
+        lootPreview: [
+          {
+            id: 'chitin-plate',
+            nameKey: 'item.chitinPlate',
+            rarity: 'common',
+            asset: { assetId: 'item.chitin-plate', category: 'item', fallbackIconKey: 'shield' }
+          },
+          {
+            id: 'glow-moss',
+            nameKey: 'item.glowMoss',
+            rarity: 'uncommon',
+            asset: { assetId: 'item.glow-moss', category: 'item', fallbackIconKey: 'herb' }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    id: 'sunken-crypts',
+    nameKey: 'zone.cryptTitle',
+    enemyTypesKey: 'zone.cryptEnemies',
+    minLevel: 8,
+    recommendedLevelRange: '8 - 20',
+    expPerHourEstimate: null,
+    goldPerHourEstimate: null,
+    asset: {
+      assetId: 'zone.sunken-crypts',
+      category: 'zone',
+      fallbackIconKey: 'crypt'
+    },
+    creatures: [
+      {
+        id: 'bone-sentinel',
+        nameKey: 'creature.boneSentinel',
+        minLevel: 8,
+        dangerTier: 'medium',
+        asset: {
+          assetId: 'creature.bone-sentinel',
+          category: 'creature',
+          fallbackIconKey: 'skull'
+        },
+        lootPreview: [
+          {
+            id: 'ancient-bone',
+            nameKey: 'item.ancientBone',
+            rarity: 'common',
+            asset: { assetId: 'item.ancient-bone', category: 'item', fallbackIconKey: 'bone' }
+          },
+          {
+            id: 'rusted-blade',
+            nameKey: 'item.rustedBlade',
+            rarity: 'uncommon',
+            asset: { assetId: 'item.rusted-blade', category: 'item', fallbackIconKey: 'sword' }
+          }
+        ]
+      },
+      {
+        id: 'crypt-wraith',
+        nameKey: 'creature.cryptWraith',
+        minLevel: 14,
+        dangerTier: 'medium',
+        asset: {
+          assetId: 'creature.crypt-wraith',
+          category: 'creature',
+          fallbackIconKey: 'wraith'
+        },
+        lootPreview: [
+          {
+            id: 'wraith-essence',
+            nameKey: 'item.wraithEssence',
+            rarity: 'uncommon',
+            asset: { assetId: 'item.wraith-essence', category: 'item', fallbackIconKey: 'orb' }
+          },
+          {
+            id: 'silver-ring',
+            nameKey: 'item.silverRing',
+            rarity: 'rare',
+            asset: { assetId: 'item.silver-ring', category: 'item', fallbackIconKey: 'ring' }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    id: 'ashwind-ridge',
+    nameKey: 'zone.ridgeTitle',
+    enemyTypesKey: 'zone.ridgeEnemies',
+    minLevel: 20,
+    recommendedLevelRange: '20 - 40',
+    expPerHourEstimate: null,
+    goldPerHourEstimate: null,
+    asset: {
+      assetId: 'zone.ashwind-ridge',
+      category: 'zone',
+      fallbackIconKey: 'mountain'
+    },
+    creatures: [
+      {
+        id: 'ashwind-drake',
+        nameKey: 'creature.ashDrake',
+        minLevel: 22,
+        dangerTier: 'high',
+        asset: {
+          assetId: 'creature.ashwind-drake',
+          category: 'creature',
+          fallbackIconKey: 'dragon'
+        },
+        lootPreview: [
+          {
+            id: 'drake-scale',
+            nameKey: 'item.drakeScale',
+            rarity: 'uncommon',
+            asset: { assetId: 'item.drake-scale', category: 'item', fallbackIconKey: 'armor' }
+          },
+          {
+            id: 'ash-talon',
+            nameKey: 'item.ashTalon',
+            rarity: 'rare',
+            asset: { assetId: 'item.ash-talon', category: 'item', fallbackIconKey: 'claw' }
+          }
+        ]
+      },
+      {
+        id: 'ember-acolyte',
+        nameKey: 'creature.emberAcolyte',
+        minLevel: 26,
+        dangerTier: 'high',
+        asset: {
+          assetId: 'creature.ember-acolyte',
+          category: 'creature',
+          fallbackIconKey: 'staff'
+        },
+        lootPreview: [
+          {
+            id: 'ember-scroll',
+            nameKey: 'item.emberScroll',
+            rarity: 'uncommon',
+            asset: { assetId: 'item.ember-scroll', category: 'item', fallbackIconKey: 'scroll' }
+          },
+          {
+            id: 'ritual-amulet',
+            nameKey: 'item.ritualAmulet',
+            rarity: 'rare',
+            asset: { assetId: 'item.ritual-amulet', category: 'item', fallbackIconKey: 'amulet' }
+          }
+        ]
+      }
+    ]
+  }
+];
+
+export interface LevelXpProgress {
+  readonly level: number;
+  readonly currentXp: number;
+  readonly levelFloorXp: number;
+  readonly nextLevelXp: number;
+  readonly progressPercent: number;
+}
+
+export function calculateTotalXpForLevel(level: number): number {
+  if (!Number.isSafeInteger(level) || level <= 1) {
+    return 0;
+  }
+  const n = level - 1;
+  return Math.floor((50 * n * (n * n + 5)) / 3);
+}
+
+export function calculateLevelXpProgress(level: number, currentXp: number): LevelXpProgress {
+  const safeLevel = Math.max(1, Math.floor(level));
+  const safeXp = Math.max(0, Math.floor(currentXp));
+  const levelFloorXp = calculateTotalXpForLevel(safeLevel);
+  const nextLevelXp = calculateTotalXpForLevel(safeLevel + 1);
+  const span = Math.max(1, nextLevelXp - levelFloorXp);
+  const earnedInLevel = Math.max(0, safeXp - levelFloorXp);
+  const progressPercent = Math.min(100, Math.max(0, Math.floor((earnedInLevel / span) * 100)));
+
+  return {
+    level: safeLevel,
+    currentXp: safeXp,
+    levelFloorXp,
+    nextLevelXp,
+    progressPercent
+  };
+}
 
 export const RESERVED_CHARACTER_NAMES: ReadonlySet<string> = new Set([
   'admin',

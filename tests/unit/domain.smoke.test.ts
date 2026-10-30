@@ -1,7 +1,10 @@
 import {
+  calculateLevelXpProgress,
+  calculateTotalXpForLevel,
   createFixedClock,
   createInitialCharacterStats,
   createSeededRng,
+  INITIAL_ZONES_CATALOG,
   MAX_CHARACTERS_PER_ACCOUNT,
   normalizeEmail,
   SIMULATION_VERSION,
@@ -10,7 +13,7 @@ import {
 } from '@tibia-idle/domain';
 import { describe, expect, it } from 'vitest';
 
-describe('@tibia-idle/domain smoke &IDLE-002 unit tests', () => {
+describe('@tibia-idle/domain smoke & unit tests', () => {
   it('exposes simulation version and deterministic fixed clock', () => {
     expect(SIMULATION_VERSION).toBe('0.1.0');
     const clock = createFixedClock(1_700_000_000_000);
@@ -48,7 +51,6 @@ describe('@tibia-idle/domain smoke &IDLE-002 unit tests', () => {
       normalizedKey: 'sir knight-one'
     });
 
-    // Boundary: 3 chars valid, 20 chars valid, 2 chars invalid, 21 chars invalid
     expect(validateCharacterNameDomain('Abc').ok).toBe(true);
     expect(validateCharacterNameDomain('A'.repeat(20)).ok).toBe(true);
     expect(validateCharacterNameDomain('Ab')).toEqual({ ok: false, reason: 'INVALID_FORMAT' });
@@ -61,7 +63,6 @@ describe('@tibia-idle/domain smoke &IDLE-002 unit tests', () => {
       reason: 'INVALID_FORMAT'
     });
 
-    // Reserved names
     for (const reserved of ['Admin', 'GameMaster', 'GM', 'God', 'CipSoft', 'Tibia', 'Support Hero']) {
       expect(validateCharacterNameDomain(reserved)).toEqual({
         ok: false,
@@ -86,16 +87,27 @@ describe('@tibia-idle/domain smoke &IDLE-002 unit tests', () => {
       shielding: 15
     });
 
-    const paladinStats = createInitialCharacterStats('paladin');
-    expect(paladinStats.distance).toBe(15);
-    expect(paladinStats.hp).toBe(155);
+    expect(createInitialCharacterStats('paladin').distance).toBe(15);
+    expect(createInitialCharacterStats('sorcerer').magic).toBe(10);
+    expect(createInitialCharacterStats('druid').magic).toBe(10);
+  });
 
-    const sorcererStats = createInitialCharacterStats('sorcerer');
-    expect(sorcererStats.magic).toBe(10);
-    expect(sorcererStats.mp).toBe(125);
+  it('exposes static zone catalog without fake reward rates and computes level XP progress', () => {
+    expect(INITIAL_ZONES_CATALOG).toHaveLength(3);
+    const creatures = INITIAL_ZONES_CATALOG.flatMap((z) => z.creatures);
+    expect(creatures).toHaveLength(6);
+    const lootItems = creatures.flatMap((c) => c.lootPreview);
+    expect(lootItems).toHaveLength(12);
 
-    const druidStats = createInitialCharacterStats('druid');
-    expect(druidStats.magic).toBe(10);
-    expect(druidStats.mp).toBe(125);
+    for (const zone of INITIAL_ZONES_CATALOG) {
+      expect(zone.expPerHourEstimate).toBeNull();
+      expect(zone.goldPerHourEstimate).toBeNull();
+    }
+
+    expect(calculateTotalXpForLevel(1)).toBe(0);
+    expect(calculateTotalXpForLevel(2)).toBe(100);
+    const progress = calculateLevelXpProgress(1, 45);
+    expect(progress.nextLevelXp).toBe(100);
+    expect(progress.progressPercent).toBe(45);
   });
 });

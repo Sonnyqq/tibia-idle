@@ -11,10 +11,10 @@ All stages start **NOT STARTED**; a roadmap line is not evidence of code. No mer
 
 ## P01 — TypeScript skeleton + auth + localized UI
 - [x] Create pnpm workspace, pinned Node/package-manager, typecheck, lint, test commands (`IDLE-001`, merged in PR #1).
-- [x] Real PostgreSQL schema (`0002_auth_sessions_characters.sql`), versioned migrations, test DB reset (`IDLE-002`).
-- [x] Account registration/login/logout (Argon2id, hashed HttpOnly sessions, CSRF, rate limits), character create/read (max 3, 4 vocations), locale persisted (`IDLE-002`).
-- [ ] React responsive shell: bottom mobile nav, desktop layout, PL/EN switch, empty hunt panel (`IDLE-003`).
-- [x] Unit, contract, DB integration, E2E register/login/character (desktop/mobile), auth abuse & concurrency tests (`IDLE-002`).
+- [x] Real PostgreSQL schema (`0002_auth_sessions_characters.sql`), versioned migrations, test DB reset (`IDLE-002`, merged in PR #2).
+- [x] Account registration/login/logout (Argon2id, hashed HttpOnly sessions, CSRF, rate limits), character create/read (max 3, 4 vocations), locale persisted (`IDLE-002`, merged in PR #2).
+- [x] React responsive shell: bottom mobile nav, desktop layout, PL/EN switch, empty hunt panel, 5 views: Dashboard, Hunts, Character, Inventory, Bestiary (`IDLE-003`).
+- [x] Unit, contract, DB integration, E2E register/login/character + 5-screen responsive shell (`320px`/`390px`/`768px`/`1280px`), auth abuse & concurrency tests (`IDLE-002`, `IDLE-003`).
 **Exit:** one user can register, change language and create a character; real CI regression.
 
 ## P02 — first vertical slice of idle hunts (HIGHEST RISK)

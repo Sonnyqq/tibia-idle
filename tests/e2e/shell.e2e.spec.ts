@@ -1,78 +1,197 @@
-import { randomUUID } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { expect, test } from '@playwright/test';
 
-test('renders PL shell by default, switches PL/EN, and completes register -> create character -> dashboard -> logout flow on desktop & mobile', async ({
+const SCREENSHOT_DIR = process.env.SCREENSHOT_OUTPUT_DIR ?? 'test-results/screenshots';
+
+test('completes full Tibia-client responsive PC (1440x900, 1280x800) & mobile (768px, 390px, 320px) flow, all 5 screens, console log, tooltips, PL/EN switch, F5 reload, and captures 10 visual QA screenshots', async ({
   page
 }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
+  mkdirSync(SCREENSHOT_DIR, { recursive: true });
+
+  const consoleErrors: string[] = [];
+  page.on('console', (msg) => {
+    if (msg.type() === 'error') {
+      consoleErrors.push(msg.text());
+    }
+  });
+
+  const assertNoHorizontalOverflow = async () => {
+    const metrics = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      innerWidth: window.innerWidth
+    }));
+    expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.innerWidth);
+  };
+
+  // 10. Login mobile 320x640 first before registering
+  await page.setViewportSize({ width: 320, height: 640 });
   await page.goto('/');
-
-  await expect(page.getByTestId('app-shell')).toHaveAttribute('data-locale', 'pl');
-  await expect(page.getByTestId('nav.hunts')).toHaveText('Polowania');
   await expect(page.getByTestId('auth-heading')).toHaveText('Zaloguj się na konto');
+  await assertNoHorizontalOverflow();
+  await page.screenshot({
+    path: join(SCREENSHOT_DIR, '10-login-mobile-320x640.png'),
+    fullPage: true
+  });
 
-  // Switch to EN and back to PL
-  await page.getByTestId('lang-en').click();
-  await expect(page.getByTestId('app-shell')).toHaveAttribute('data-locale', 'en');
-  await expect(page.getByTestId('nav.hunts')).toHaveText('Hunts');
-  await expect(page.getByTestId('auth-heading')).toHaveText('Sign in to account');
-
-  await page.getByTestId('lang-pl').click();
-  await expect(page.getByTestId('app-shell')).toHaveAttribute('data-locale', 'pl');
+  // 1. Login desktop 1440x900
+  await page.setViewportSize({ width: 1440, height: 900 });
   await expect(page.getByTestId('auth-heading')).toHaveText('Zaloguj się na konto');
+  await assertNoHorizontalOverflow();
+  await page.screenshot({
+    path: join(SCREENSHOT_DIR, '01-login-desktop-1440x900.png'),
+    fullPage: true
+  });
 
-  // Switch to registration mode and register a new account
+  // Switch to registration & create account
   await page.getByTestId('auth-mode-toggle').click();
   await expect(page.getByTestId('auth-heading')).toHaveText('Utwórz nowe konto');
 
-  const uniqueSuffix = randomUUID().replace(/[^a-zA-Z]/g, '').slice(0, 8);
-  const email = `e2e.${uniqueSuffix}@example.com`;
-  const password = 'E2eStrongPassword!99';
-  const charName = `Rycerz${uniqueSuffix}`;
-
-  await page.getByTestId('auth-email-input').fill(email);
-  await page.getByTestId('auth-password-input').fill(password);
+  const uniqueEmail = `e2e-${Date.now()}@example.com`;
+  await page.getByTestId('auth-email-input').fill(uniqueEmail);
+  await page.getByTestId('auth-password-input').fill('StrongPass123!');
   await page.getByTestId('auth-submit-button').click();
 
-  // Character selection screen should now be visible with 0 / 3 slots
+  // Character lobby
   await expect(page.getByTestId('character-select-panel')).toBeVisible();
-  await expect(page.getByTestId('character-slots-indicator')).toContainText('0 / 3');
-
-  // Verify no session token is stored in localStorage
-  const localStorageKeys = await page.evaluate(() => Object.keys(window.localStorage));
-  expect(localStorageKeys).toEqual([]);
-
-  // Logout and log back in
-  await page.getByTestId('logout-button').click();
-  await expect(page.getByTestId('auth-panel')).toBeVisible();
-
-  await page.getByTestId('auth-mode-toggle').click();
-  await expect(page.getByTestId('auth-heading')).toHaveText('Zaloguj się na konto');
-  await page.getByTestId('auth-email-input').fill(email);
-  await page.getByTestId('auth-password-input').fill(password);
-  await page.getByTestId('auth-submit-button').click();
-
-  await expect(page.getByTestId('character-create-panel')).toBeVisible();
-
-  // Switch to mobile viewport and create a character
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByTestId('character-name-input').fill(charName);
+  await page.getByTestId('character-name-input').fill('Valkor');
   await page.getByTestId('character-vocation-select').selectOption('knight');
   await page.getByTestId('character-create-submit').click();
 
-  // Character Dashboard should appear with Level 1 Knight stats
+  // 2. Dashboard desktop 1440x900
   await expect(page.getByTestId('character-dashboard')).toBeVisible();
-  await expect(page.getByTestId('dashboard-character-name')).toHaveText(charName);
-  await expect(page.getByTestId('stat-level')).toContainText('1');
-  await expect(page.getByTestId('stat-hp')).toContainText('185 / 185');
-  await expect(page.getByTestId('stat-mp')).toContainText('40 / 40');
-  await expect(page.getByTestId('stat-gold')).toContainText('100');
+  await expect(page.getByTestId('dashboard-character-name')).toHaveText('Valkor');
+  await expect(page.getByTestId('dashboard-activity-status')).toContainText(
+    'Odpoczynek w obozie — brak aktywnego polowania'
+  );
+  await expect(page.getByTestId('game-log-panel')).toBeVisible();
+  await assertNoHorizontalOverflow();
+  await page.screenshot({
+    path: join(SCREENSHOT_DIR, '02-dashboard-desktop-1440x900.png'),
+    fullPage: true
+  });
 
-  // Switch back to character list, verify 1 / 3 slots used, then logout
-  await page.getByTestId('back-to-characters-button').click();
-  await expect(page.getByTestId('character-slots-indicator')).toContainText('1 / 3');
-  await expect(page.getByTestId(`character-item-${charName}`)).toBeVisible();
+  // Check 1280x800 desktop viewport as well
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await assertNoHorizontalOverflow();
+  await page.setViewportSize({ width: 1440, height: 900 });
 
+  // 3. Hunts desktop 1440x900
+  await page.getByTestId('nav.hunts').click();
+  await expect(page.getByTestId('hunts-view')).toBeVisible();
+  await expect(page.getByTestId('zone-card-damp-catacombs')).toBeVisible();
+  await expect(page.getByTestId('zone-card-sunken-crypts')).toBeVisible();
+  await expect(page.getByTestId('zone-card-ashwind-ridge')).toBeVisible();
+  await expect(page.getByTestId('start-hunt-damp-catacombs')).toBeDisabled();
+  await assertNoHorizontalOverflow();
+  await page.screenshot({
+    path: join(SCREENSHOT_DIR, '03-hunts-desktop-1440x900.png'),
+    fullPage: true
+  });
+
+  // 4. Character & Skills desktop 1440x900
+  await page.getByTestId('nav.character').click();
+  await expect(page.getByTestId('character-view')).toBeVisible();
+  await expect(page.getByTestId('char-sheet-melee')).toContainText('15');
+  await expect(page.getByTestId('char-sheet-sword')).toContainText('15');
+  await expect(page.getByTestId('character-talents-panel')).toBeVisible();
+  await assertNoHorizontalOverflow();
+  await page.screenshot({
+    path: join(SCREENSHOT_DIR, '04-character-desktop-1440x900.png'),
+    fullPage: true
+  });
+
+  // 5. Inventory desktop 1440x900
+  await page.getByTestId('nav.inventory').click();
+  await expect(page.getByTestId('inventory-view')).toBeVisible();
+  await page.getByTestId('equip-slot-helmet').click();
+  await expect(page.getByTestId('inventory-slot-tooltip')).toContainText('Głowa');
+  await expect(page.getByTestId('inventory-backpack-empty')).toBeVisible();
+  await assertNoHorizontalOverflow();
+  await page.screenshot({
+    path: join(SCREENSHOT_DIR, '05-inventory-desktop-1440x900.png'),
+    fullPage: true
+  });
+
+  // 6. Bestiary desktop 1440x900 + PL/EN live switch + F5 reload persistence
+  await page.getByTestId('nav.bestiary').click();
+  await expect(page.getByTestId('bestiary-view')).toBeVisible();
+  await page.getByTestId('bestiary-select-ashwind-drake').click();
+  await expect(page.getByTestId('bestiary-detail-name')).toHaveText('Popielny Drakon');
+  await assertNoHorizontalOverflow();
+  await page.screenshot({
+    path: join(SCREENSHOT_DIR, '06-bestiary-desktop-1440x900.png'),
+    fullPage: true
+  });
+
+  // Switch language PL -> EN on Bestiary without resetting active view
+  await page.getByTestId('lang-en').click();
+  await expect(page.getByTestId('app-shell')).toHaveAttribute('data-locale', 'en');
+  await expect(page.getByTestId('bestiary-detail-name')).toHaveText('Ashwind Drake');
+
+  // Test bottom console log tab switching
+  await page.getByTestId('log-tab-hunt').click();
+  await expect(page.getByTestId('game-log-empty')).toContainText(
+    'No active or settled hunts recorded.'
+  );
+  await page.getByTestId('log-tab-system').click();
+
+  // Reload page (F5) -> preserves session, locale (EN), character (Valkor), and active tab (Bestiary)
+  await page.reload();
+  await expect(page.getByTestId('app-shell')).toHaveAttribute('data-locale', 'en');
+  await expect(page.getByTestId('bestiary-view')).toBeVisible();
+
+  // Switch back to PL for mobile screenshots & checks
+  await page.getByTestId('lang-pl').click();
+  await expect(page.getByTestId('app-shell')).toHaveAttribute('data-locale', 'pl');
+
+  // Tablet 768x1024 check
+  await page.setViewportSize({ width: 768, height: 1024 });
+  await expect(page.getByTestId('mobile-bottom-nav')).toBeVisible();
+  await assertNoHorizontalOverflow();
+
+  // 7. Dashboard mobile 390x844
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByTestId('mobile-nav-dashboard').click();
+  await expect(page.getByTestId('character-dashboard')).toBeVisible();
+  await assertNoHorizontalOverflow();
+  await page.screenshot({
+    path: join(SCREENSHOT_DIR, '07-dashboard-mobile-390x844.png'),
+    fullPage: true
+  });
+
+  // 8. Hunts mobile 390x844
+  await page.getByTestId('mobile-nav-hunts').click();
+  await expect(page.getByTestId('hunts-view')).toBeVisible();
+  await assertNoHorizontalOverflow();
+  await page.screenshot({
+    path: join(SCREENSHOT_DIR, '08-hunts-mobile-390x844.png'),
+    fullPage: true
+  });
+
+  // 9. Inventory mobile 390x844
+  await page.getByTestId('mobile-nav-inventory').click();
+  await expect(page.getByTestId('inventory-view')).toBeVisible();
+  await page.getByTestId('equip-slot-shield').click();
+  await expect(page.getByTestId('inventory-slot-tooltip')).toContainText('Lewa dłoń');
+  await assertNoHorizontalOverflow();
+  await page.screenshot({
+    path: join(SCREENSHOT_DIR, '09-inventory-mobile-390x844.png'),
+    fullPage: true
+  });
+
+  // Smallest mobile 320x640 check across views
+  await page.setViewportSize({ width: 320, height: 640 });
+  await assertNoHorizontalOverflow();
+  await page.getByTestId('mobile-nav-character').click();
+  await expect(page.getByTestId('character-view')).toBeVisible();
+  await assertNoHorizontalOverflow();
+
+  // Logout
   await page.getByTestId('logout-button').click();
   await expect(page.getByTestId('auth-panel')).toBeVisible();
+
+  const localStorageKeys = await page.evaluate(() => Object.keys(window.localStorage));
+  expect(localStorageKeys).toEqual([]);
+  expect(consoleErrors).toEqual([]);
 });

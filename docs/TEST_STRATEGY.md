@@ -1,7 +1,7 @@
 # Test strategy — feature-by-feature TDD + release gates
 
 ## Honest current status
-Only repository guardrails and PL/EN parity tests are implemented in the starter. **There are no gameplay, database, API or browser tests until those features are coded.** Never report FULL PASS for code that does not exist.
+In P01 (`IDLE-001`, `IDLE-002`, `IDLE-003` / `IDLE-003B`), repository guardrails, PL/EN parity checks, strict TypeScript/ESLint checks, unit tests (`packages/domain`, `packages/contracts`, `packages/database`, `packages/i18n`, `apps/api` security, `apps/web` Tibia-client UI components & SSR), live PostgreSQL integration tests (migrations `0001`+`0002`, Argon2id auth, hashed HttpOnly sessions, CSRF, character slot limits & concurrency races, read-only `/zones`), and Playwright browser E2E tests (desktop `1440x900`/`1280x800` & mobile `768px`/`390px`/`320px`, 10 visual QA screenshots in `test-results/screenshots/`) are active. **Combat simulation, offline hunt settlement, inventory item movement, and market tests do not exist until P02+.** Never report FULL PASS for code that does not exist.
 
 ## Test ladder
 | Layer | When | Real dependencies | Examples |
@@ -55,8 +55,11 @@ Only repository guardrails and PL/EN parity tests are implemented in the starter
 - Define measured performance targets in P02 after baseline, before implementation optimization. Do not invent a stable p95 or promise 5000 active sessions without tests.
 - Store profiling artifacts and a compact pass/fail summary, not megabytes of raw logs in PR comments.
 
-## First starter commands
-- `npm run check:docs` — project documentation, references and key files
-- `npm run test:tooling` — node built-in tests for guardrails / locales
-- `npm run verify` — both commands, currently all available checks
-- Future code tasks introduce real `test:unit`, `test:integration`, `test:e2e`, `lint`, `typecheck`, `test:full` commands and CI gates, not dummy no-op scripts.
+## Current P01 verification commands
+- `pnpm run check:docs` — project documentation, references and instruction size budgets
+- `pnpm run test:tooling` — node built-in tests for guardrails, layer boundaries and PL/EN locale parity
+- `pnpm run lint` & `pnpm run typecheck` — strict ESLint and TypeScript build/typecheck across all workspaces
+- `pnpm run test:unit` — Vitest unit & SSR component suites
+- `REQUIRE_DB_TESTS=1 pnpm run test:integration` — Vitest integration, security & race suites against live PostgreSQL
+- `pnpm run test:e2e` — Playwright browser E2E & visual QA screenshots (`test-results/screenshots/`)
+- `REQUIRE_DB_TESTS=1 pnpm run ci:local` — full local quality gate (`verify` + `test:e2e`)

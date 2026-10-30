@@ -11,7 +11,8 @@ import {
   RegisterRequestSchema,
   SessionMeResponseSchema,
   UpdateLocaleRequestSchema,
-  UserDtoSchema
+  UserDtoSchema,
+  ZonesCatalogResponseSchema
 } from '@tibia-idle/contracts';
 import {
   type ActiveSessionRecord,
@@ -28,6 +29,7 @@ import {
 import {
   type Clock,
   createSystemClock,
+  INITIAL_ZONES_CATALOG,
   MAX_CHARACTERS_PER_ACCOUNT,
   SIMULATION_VERSION
 } from '@tibia-idle/domain';
@@ -40,7 +42,7 @@ import {
   hashPasswordArgon2id,
   hashSessionToken,
   parseCookieHeader,
-   serializeClearSessionCookie,
+  serializeClearSessionCookie,
   serializeSessionCookie,
   SESSION_COOKIE_NAME,
   SESSION_TTL_MS,
@@ -196,6 +198,22 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
     };
   });
 
+  app.get('/zones', async (request, reply) => {
+    const pool = requirePool(request, reply);
+    if (!pool) return;
+
+    const resolved = await resolveActiveSession(request, pool);
+    if (!resolved) {
+      return sendApiError(reply, request, 401, 'UNAUTHORIZED', 'auth.unauthorized');
+    }
+
+    const payload = ZonesCatalogResponseSchema.parse({
+      zones: INITIAL_ZONES_CATALOG,
+      simulationEnabled: false
+    });
+    return reply.code(200).send(payload);
+  });
+
   app.post('/auth/register', async (request, reply) => {
     const pool = requirePool(request, reply);
     if (!pool) return;
@@ -226,7 +244,6 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
       return sendApiError(reply, request, 409, 'EMAIL_TAKEN', 'auth.emailTaken');
     }
 
-    // Revoke any pre-existing session cookie to prevent session fixation
     const existingCookies = parseCookieHeader(request.headers.cookie);
     const oldToken = existingCookies[SESSION_COOKIE_NAME];
     if (oldToken) {
@@ -294,7 +311,6 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
     const nowMs = clock.nowMs();
     const nowIso = new Date(nowMs).toISOString();
 
-    // Session fixation defense: always revoke any prior session token and issue a fresh token
     const existingCookies = parseCookieHeader(request.headers.cookie);
     const oldToken = existingCookies[SESSION_COOKIE_NAME];
     if (oldToken) {
@@ -448,9 +464,21 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
         case 'INVALID_NAME':
           return sendApiError(reply, request, 400, 'CHARACTER_NAME_INVALID', 'character.nameInvalid');
         case 'RESERVED_NAME':
-          return sendApiError(reply, request, 400, 'CHARACTER_NAME_RESERVED', 'character.nameReserved');
+          return sendApiError(
+            reply,
+            request,
+            400,
+            'CHARACTER_NAME_RESERVED',
+            'character.nameReserved'
+          );
         case 'CHARACTER_LIMIT_REACHED':
-          return sendApiError(reply, request, 409, 'CHARACTER_LIMIT_REACHED', 'character.limitReached');
+          return sendApiError(
+            reply,
+            request,
+            409,
+            'CHARACTER_LIMIT_REACHED',
+            'character.limitReached'
+          );
         case 'CHARACTER_NAME_TAKEN':
           return sendApiError(reply, request, 409, 'CHARACTER_NAME_TAKEN', 'character.nameTaken');
         case 'USER_NOT_FOUND':
