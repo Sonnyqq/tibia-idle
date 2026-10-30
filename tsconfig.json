@@ -1,0 +1,24 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "baseUrl": ".",
+    "paths": {
+      "@tibia-idle/i18n": ["./packages/i18n/src/index.ts"],
+      "@tibia-idle/contracts": ["./packages/contracts/src/index.ts"],
+      "@tibia-idle/domain": ["./packages/domain/src/index.ts"],
+      "@tibia-idle/database": ["./packages/database/src/index.ts"],
+      "@tibia-idle/api": ["./apps/api/src/index.ts"],
+      "@tibia-idle/web/*": ["./apps/web/src/*"]
+    }
+  },
+  "include": [
+    "tests/**/*.ts",
+    "tests/**/*.tsx",
+    "vitest.unit.config.ts",
+    "vitest.integration.config.ts",
+    "playwright.config.ts"
+  ]
+}

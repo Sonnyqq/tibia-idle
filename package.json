@@ -1,12 +1,43 @@
 {
   "name": "tibia-like-idle-starter",
   "private": true,
-  "version": "0.0.0",
-  "description": "Docs and QA starter, not a playable game",
-  "engines": {"node": ">=22"},
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Docs and QA starter + TypeScript strict monorepo scaffold, not a playable game",
+  "packageManager": "pnpm@12.16.1",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r build && pnpm -r typecheck && tsc --noEmit -p tsconfig.json",
+    "lint": "eslint .",
     "check:docs": "node scripts/check-docs.mjs",
     "test:tooling": "node --test tests/tooling/*.test.mjs",
-    "verify": "npm run check:docs && npm run test:tooling"
+    "test:unit": "vitest run --config vitest.unit.config.ts",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:e2e": "playwright test",
+    "verify": "pnpm run check:docs && pnpm run test:tooling && pnpm run lint && pnpm run typecheck && pnpm run test:unit && pnpm run test:integration",
+    "ci:local": "pnpm run verify && pnpm run test:e2e"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.22.0",
+    "@playwright/test": "^1.51.0",
+    "@types/node": "^22.13.10",
+    "@types/pg": "^8.11.11",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "^9.22.0",
+    "fastify": "^5.2.1",
+    "globals": "^16.0.0",
+    "pg": "^8.13.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.8.2",
+    "typescript-eslint": "^8.26.1",
+    "vite": "^6.2.1",
+    "vitest": "^3.0.8",
+    "zod": "^3.24.2"
   }
 }

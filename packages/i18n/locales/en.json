@@ -1,5 +1,6 @@
 {
   "app.title": "Idle MMORPG",
+  "app.scaffoldNotice": "P01 technical scaffold ready. Gameplay mechanics are not implemented yet.",
   "nav.dashboard": "Dashboard",
   "nav.hunts": "Hunts",
   "nav.character": "Character",
@@ -12,5 +13,7 @@
   "hunt.profitPerHour": "Profit per hour",
   "common.loading": "Loading...",
   "common.error": "An error occurred",
-  "settings.language": "Language"
+  "settings.language": "Language",
+  "settings.localePl": "Polski",
+  "settings.localeEn": "English"
 }

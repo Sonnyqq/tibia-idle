@@ -1,5 +1,6 @@
 {
   "app.title": "Idle MMORPG",
+  "app.scaffoldNotice": "Szkielet techniczny P01 gotowy. Mechaniki rozgrywki nie są jeszcze zaimplementowane.",
   "nav.dashboard": "Panel",
   "nav.hunts": "Polowania",
   "nav.character": "Postać",
@@ -12,5 +13,7 @@
   "hunt.profitPerHour": "Zysk na godzinę",
   "common.loading": "Ładowanie...",
   "common.error": "Wystąpił błąd",
-  "settings.language": "Język"
+  "settings.language": "Język",
+  "settings.localePl": "Polski",
+  "settings.localeEn": "English"
 }
