@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tibia_idle}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tibia_idle_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-tibia_idle_test}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-tibia_idle} -d $${POSTGRES_DB:-tibia_idle_test}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

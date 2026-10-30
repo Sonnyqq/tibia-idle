@@ -10,11 +10,11 @@ All stages start **NOT STARTED**; a roadmap line is not evidence of code. No mer
 **Exit:** rules, docs and docs/i18n CI pass on new repo. (Locally testable, not yet pushed.)
 
 ## P01 — TypeScript skeleton + auth + localized UI
-- [ ] Create pnpm workspace, pinned Node/package-manager, typecheck, lint, test commands.
-- [ ] Real PostgreSQL schema, migrations, test DB, reset/seed and backup/restore procedure.
-- [ ] Account registration/login/logout, security controls, character create/read, locale persisted.
-- [ ] React responsive shell: bottom mobile nav, desktop layout, PL/EN switch, empty hunt panel.
-- [ ] Unit, contract, DB integration, E2E register/login (desktop/mobile), auth abuse tests.
+- [x] Create pnpm workspace, pinned Node/package-manager, typecheck, lint, test commands (`IDLE-001`).
+- [ ] Real PostgreSQL schema, migrations, test DB, reset/seed and backup/restore procedure (`IDLE-002`).
+- [ ] Account registration/login/logout, security controls, character create/read, locale persisted (`IDLE-002`).
+- [ ] React responsive shell: bottom mobile nav, desktop layout, PL/EN switch, empty hunt panel (`IDLE-003`).
+- [ ] Unit, contract, DB integration, E2E register/login (desktop/mobile), auth abuse tests (`IDLE-002`/`IDLE-003`).
 **Exit:** one user can register, change language and create a character; real CI regression.
 
 ## P02 — first vertical slice of idle hunts (HIGHEST RISK)
@@ -49,6 +49,7 @@ All stages start **NOT STARTED**; a roadmap line is not evidence of code. No mer
 - [ ] Three solo bosses, combat phase rules and cooldowns.
 - [ ] Fixed-price market with escrow, fees and single-owner inventory.
 - [ ] Race/cancel/buy, ledger reconciliation, anti-abuse and migration tests.
+- [ ] Migration up/down tests.
 **Exit:** no double spend/dupe, authorized trades only.
 
 ## P07 — social and administration

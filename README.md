@@ -1,14 +1,14 @@
-# Tibia-like Idle — professional starter kit
+# Tibia-like Idle — TypeScript Strict Monorepo Scaffold
 
-**Status: architecture and quality-gate starter, NOT a playable game.** Proposed product: a two-language (Polish + English), purely browser-based, text-and-icons idle MMORPG aimed at Tibia fans. No moving a character on a map and no downloadable client.
+**Status: P01 technical scaffold (`IDLE-001`), NOT a playable game.** Proposed product: a two-language (Polish + English), purely browser-based, text-and-icons idle MMORPG aimed at Tibia fans. No moving a character on a map and no downloadable client. Gameplay mechanics are not yet implemented.
 
-## First commands (Node.js 24 recommended)
+## Commands (Node.js 24+ and `pnpm` recommended)
 
 ```bash
-npm run verify
+pnpm install
+pnpm run verify
+pnpm run test:e2e
 ```
-
-The only runnable checks today validate documentation and PL/EN localization parity. Game unit/integration/E2E suites will be implemented with each feature; they are not yet present. No dependency installation is needed to run these first checks.
 
 ## Quick navigation
 - [`AGENTS.md`](AGENTS.md): one canonical short instruction set for coding agents
