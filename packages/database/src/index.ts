@@ -142,6 +142,7 @@ export async function applyMigrations(
   const appliedNow: string[] = [];
   try {
     await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(74219001)');
     await client.query(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         version TEXT PRIMARY KEY,
