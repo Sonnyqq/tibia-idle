@@ -1,4 +1,27 @@
-import { argon2, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import * as nodeCrypto from 'node:crypto';
+
+const { createHash, randomBytes, timingSafeEqual } = nodeCrypto;
+
+interface Argon2Parameters {
+  message: Buffer;
+  nonce: Buffer;
+  parallelism: number;
+  tagLength: number;
+  memory: number;
+  passes: number;
+}
+
+type Argon2Callback = (err: Error | null, derivedKey: Buffer) => void;
+
+type CryptoWithArgon2 = typeof nodeCrypto & {
+  argon2: (
+    algorithm: 'argon2d' | 'argon2i' | 'argon2id',
+    parameters: Argon2Parameters,
+    callback: Argon2Callback
+  ) => void;
+};
+
+const { argon2 } = nodeCrypto as CryptoWithArgon2;
 
 const ARGON2_MEMORY = 19456;
 const ARGON2_PASSES = 2;
@@ -27,7 +50,7 @@ function runArgon2id(
         parallelism,
         tagLength
       },
-      (err, derivedKey) => {
+      (err: Error | null, derivedKey: Buffer) => {
         if (err) {
           reject(err);
           return;
@@ -58,7 +81,6 @@ export async function verifyPasswordArgon2id(
   encodedHash: string
 ): Promise<boolean> {
   const parts = encodedHash.split('$');
-  // Expected: ['', 'argon2id', 'v=19', 'm=...,t=...,p=...', '<saltB64>', '<tagB64>']
   if (parts.length !== 6 || parts[1] !== 'argon2id' || parts[2] !== 'v=19') {
     return false;
   }
