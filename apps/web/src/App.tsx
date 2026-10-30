@@ -45,8 +45,18 @@ import {
   VOCATION_KEY_MAP
 } from './lib/format.js';
 
+const SESSION_STORAGE_AUTH_FLAG = 'tibia_idle_has_session';
 const SESSION_STORAGE_CHAR_KEY = 'tibia_idle_ui_char_id';
 const SESSION_STORAGE_TAB_KEY = 'tibia_idle_ui_tab_id';
+
+function hasActiveSessionHint(): boolean {
+  if (typeof window === 'undefined' || !window.sessionStorage) return false;
+  try {
+    return window.sessionStorage.getItem(SESSION_STORAGE_AUTH_FLAG) === '1';
+  } catch {
+    return false;
+  }
+}
 
 function readSessionUiState(): { charId: string | null; tab: GameTabId } {
   if (typeof window === 'undefined' || !window.sessionStorage) {
@@ -67,6 +77,7 @@ function readSessionUiState(): { charId: string | null; tab: GameTabId } {
 function writeSessionUiState(charId: string | null, tab: GameTabId): void {
   if (typeof window === 'undefined' || !window.sessionStorage) return;
   try {
+    window.sessionStorage.setItem(SESSION_STORAGE_AUTH_FLAG, '1');
     if (charId) {
       window.sessionStorage.setItem(SESSION_STORAGE_CHAR_KEY, charId);
     } else {
@@ -81,6 +92,7 @@ function writeSessionUiState(charId: string | null, tab: GameTabId): void {
 function clearSessionUiState(): void {
   if (typeof window === 'undefined' || !window.sessionStorage) return;
   try {
+    window.sessionStorage.removeItem(SESSION_STORAGE_AUTH_FLAG);
     window.sessionStorage.removeItem(SESSION_STORAGE_CHAR_KEY);
     window.sessionStorage.removeItem(SESSION_STORAGE_TAB_KEY);
   } catch {
@@ -185,6 +197,8 @@ export function App({
           setSelectedCharacterId(foundChar.id);
           setActiveTab(saved.tab);
         }
+      } else {
+        writeSessionUiState(null, 'dashboard');
       }
       void loadZonesCatalog();
     },
@@ -192,7 +206,7 @@ export function App({
   );
 
   useEffect(() => {
-    if (initialUser) return;
+    if (initialUser || !hasActiveSessionHint()) return;
     let cancelled = false;
     const checkExistingSession = async () => {
       try {

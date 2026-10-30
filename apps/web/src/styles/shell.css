@@ -1316,7 +1316,7 @@ body {
    ========================================== */
 .mobile-bottom-nav {
   display: none;
-  position: fixed;
+  position: sticky;
   left: 0;
   right: 0;
   bottom: 0;
@@ -1384,12 +1384,9 @@ body {
     font-size: 14px;
   }
 
-  .app-shell {
-    padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
-  }
-
   .desktop-sidebar,
-  .context-aside {
+  .context-aside,
+  .center-status-strip .game-tabs-bar {
     display: none;
   }
 
