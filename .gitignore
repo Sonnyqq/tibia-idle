@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+coverage/
+playwright-report/
+test-results/
+.env
+.env.*
+!.env.example
+*.log
+*.db
+*.sqlite
+.DS_Store
+CLAUDE.local.md

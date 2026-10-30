@@ -1,0 +1,12 @@
+{
+  "name": "tibia-like-idle-starter",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Docs and QA starter, not a playable game",
+  "engines": {"node": ">=22"},
+  "scripts": {
+    "check:docs": "node scripts/check-docs.mjs",
+    "test:tooling": "node --test tests/tooling/*.test.mjs",
+    "verify": "npm run check:docs && npm run test:tooling"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "app.title": "Idle MMORPG",
+  "nav.dashboard": "Panel",
+  "nav.hunts": "Polowania",
+  "nav.character": "Postać",
+  "nav.inventory": "Ekwipunek",
+  "nav.more": "Więcej",
+  "hunt.start": "Rozpocznij polowanie",
+  "hunt.stop": "Zakończ polowanie",
+  "hunt.offlineSummary": "Podsumowanie polowania offline",
+  "hunt.xpPerHour": "EXP na godzinę",
+  "hunt.profitPerHour": "Zysk na godzinę",
+  "common.loading": "Ładowanie...",
+  "common.error": "Wystąpił błąd",
+  "settings.language": "Język"
+}

@@ -1,0 +1,16 @@
+{
+  "app.title": "Idle MMORPG",
+  "nav.dashboard": "Dashboard",
+  "nav.hunts": "Hunts",
+  "nav.character": "Character",
+  "nav.inventory": "Inventory",
+  "nav.more": "More",
+  "hunt.start": "Start hunt",
+  "hunt.stop": "Stop hunt",
+  "hunt.offlineSummary": "Offline hunt summary",
+  "hunt.xpPerHour": "XP per hour",
+  "hunt.profitPerHour": "Profit per hour",
+  "common.loading": "Loading...",
+  "common.error": "An error occurred",
+  "settings.language": "Language"
+}
