@@ -1,8 +1,21 @@
-import { type CreatureCatalogDto, type ZoneCatalogDto } from '@tibia-idle/contracts';
+import {
+  type CreatureCatalogDto,
+  type LootPreviewItemDto,
+  type ZoneCatalogDto
+} from '@tibia-idle/contracts';
 import { type SupportedLocale, t, type TranslationKey } from '@tibia-idle/i18n';
 import { useState } from 'react';
 import { GameIcon } from '../assets/assetRegistry.js';
 import { DANGER_TIER_KEY_MAP, RARITY_KEY_MAP } from '../lib/format.js';
+import {
+  GameButton,
+  GameTooltip,
+  type GameTooltipData,
+  GameWindow,
+  ItemSlot,
+  ProgressBar,
+  StatRow
+} from './ui/GameUi.js';
 
 export interface BestiaryViewProps {
   locale: SupportedLocale;
@@ -21,133 +34,175 @@ export function BestiaryView({
 }: BestiaryViewProps) {
   const allCreatures: readonly CreatureCatalogDto[] = zones.flatMap((z) => z.creatures);
   const [selectedCreatureId, setSelectedCreatureId] = useState<string | null>(null);
+  const [selectedLootItem, setSelectedLootItem] = useState<LootPreviewItemDto | null>(null);
 
   const activeCreature =
     allCreatures.find((c) => c.id === selectedCreatureId) ?? allCreatures[0] ?? null;
 
-  return (
-    <section data-testid="bestiary-view" className="center-panel">
-      <div className="panel-card">
-        <h2>{t(locale, 'bestiary.title')}</h2>
+  const activeCreatureName = activeCreature
+    ? t(locale, activeCreature.nameKey as TranslationKey)
+    : '';
 
+  const lootTooltip: GameTooltipData | null = selectedLootItem
+    ? {
+        title: t(locale, selectedLootItem.nameKey as TranslationKey),
+        subtitle: t(locale, RARITY_KEY_MAP[selectedLootItem.rarity]),
+        rarityLabel: `${t(locale, 'tooltip.rarity')}: ${t(locale, RARITY_KEY_MAP[selectedLootItem.rarity])}`,
+        description: t(locale, 'tooltip.catalogPreview'),
+        source: `${t(locale, 'tooltip.source')}: ${activeCreatureName}`
+      }
+    : null;
+
+  return (
+    <div data-testid="bestiary-view" className="workspace-stack">
+      <GameWindow
+        title={t(locale, 'bestiary.title')}
+        iconKey="skull"
+        iconCategory="monster"
+        collapsible
+        minimizeLabel={t(locale, 'window.minimize')}
+        expandLabel={t(locale, 'window.expand')}
+      >
         {isLoading && <p data-testid="bestiary-loading">{t(locale, 'common.loading')}</p>}
 
         {errorKey && (
-          <div role="alert" data-testid="bestiary-error" className="sub-card">
-            <p>{t(locale, errorKey)}</p>
-            <button type="button" className="btn" onClick={onRetry}>
+          <div role="alert" data-testid="bestiary-error" className="game-alert-box">
+            <span>{t(locale, errorKey)}</span>
+            <GameButton size="sm" onClick={onRetry}>
               {t(locale, 'common.retry')}
-            </button>
+            </GameButton>
           </div>
         )}
 
         {!isLoading && !errorKey && allCreatures.length === 0 && (
-          <p data-testid="bestiary-empty">{t(locale, 'bestiary.emptyList')}</p>
+          <p data-testid="bestiary-empty" className="window-muted-note">
+            {t(locale, 'bestiary.emptyList')}
+          </p>
         )}
 
         {!isLoading && !errorKey && allCreatures.length > 0 && (
-          <div className="bestiary-layout">
-            <ul
-              style={{
-                listStyle: 'none',
-                margin: 0,
-                padding: 0,
-                display: 'grid',
-                gap: '0.4rem'
-              }}
-              data-testid="bestiary-creature-list"
-            >
-              {allCreatures.map((creature) => (
-                <li key={creature.id}>
-                  <button
-                    type="button"
-                    className="btn sidebar-nav-btn"
-                    data-testid={`bestiary-select-${creature.id}`}
-                    aria-pressed={activeCreature?.id === creature.id}
-                    onClick={() => setSelectedCreatureId(creature.id)}
-                  >
-                    <GameIcon asset={creature.asset} size={18} />
-                    <span>{t(locale, creature.nameKey as TranslationKey)}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
+          <div className="bestiary-master-detail">
+            <div className="bestiary-list-pane">
+              <div className="subwindow-title">{t(locale, 'hunt.creaturesInZone')}</div>
+              <ul className="bestiary-creature-list" data-testid="bestiary-creature-list">
+                {allCreatures.map((creature) => {
+                  const isSelected = activeCreature?.id === creature.id;
+                  return (
+                    <li key={creature.id}>
+                      <button
+                        type="button"
+                        className={`bestiary-creature-btn ${isSelected ? 'is-selected' : ''}`.trim()}
+                        data-testid={`bestiary-select-${creature.id}`}
+                        aria-pressed={isSelected}
+                        onClick={() => {
+                          setSelectedCreatureId(creature.id);
+                          setSelectedLootItem(null);
+                        }}
+                      >
+                        <GameIcon asset={creature.asset} category="monster" size={16} />
+                        <span className="bestiary-creature-name">
+                          {t(locale, creature.nameKey as TranslationKey)}
+                        </span>
+                        <span className="bestiary-creature-lvl">
+                          {t(locale, 'stats.level')} {creature.minLevel}+
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
 
             {activeCreature ? (
-              <div className="sub-card" data-testid="bestiary-detail-panel">
-                <div
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    gap: '0.5rem',
-                    marginBottom: '0.75rem'
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <GameIcon asset={activeCreature.asset} size={24} />
-                    <div>
-                      <h3 data-testid="bestiary-detail-name" style={{ margin: 0 }}>
-                        {t(locale, activeCreature.nameKey as TranslationKey)}
+              <div className="bestiary-inspector-pane" data-testid="bestiary-detail-panel">
+                <div className="bestiary-portrait-header">
+                  <div className="bestiary-portrait-box">
+                    <GameIcon asset={activeCreature.asset} category="monster" size={36} />
+                  </div>
+                  <div className="bestiary-header-meta">
+                    <div className="bestiary-title-row">
+                      <h3 data-testid="bestiary-detail-name" className="bestiary-creature-heading">
+                        {activeCreatureName}
                       </h3>
-                      <small style={{ color: 'var(--text-muted)' }}>
-                        {t(locale, 'stats.level')} {activeCreature.minLevel}+
-                      </small>
-                    </div>
-                  </div>
-                  <span className={`badge badge-danger-${activeCreature.dangerTier}`}>
-                    {t(locale, DANGER_TIER_KEY_MAP[activeCreature.dangerTier])}
-                  </span>
-                </div>
-
-                <div className="stats-grid" style={{ marginBottom: '0.75rem' }}>
-                  <div className="stat-box" data-testid="bestiary-kill-count">
-                    <dt>{t(locale, 'bestiary.killCountLabel')}</dt>
-                    <dd>0</dd>
-                  </div>
-                  <div className="stat-box" data-testid="bestiary-stage-status">
-                    <dt>{t(locale, 'bestiary.charmsTitle')}</dt>
-                    <dd>{t(locale, 'bestiary.stageLocked')}</dd>
-                  </div>
-                </div>
-
-                <div style={{ marginBottom: '0.75rem' }}>
-                  <strong style={{ fontSize: '0.85rem' }}>{t(locale, 'hunt.potentialLoot')}</strong>
-                  <div
-                    style={{
-                      display: 'flex',
-                      flexWrap: 'wrap',
-                      gap: '0.35rem',
-                      marginTop: '0.4rem'
-                    }}
-                  >
-                    {activeCreature.lootPreview.map((item) => (
-                      <span
-                        key={item.id}
-                        className={`badge badge-rarity-${item.rarity}`}
-                        data-testid={`bestiary-loot-${item.id}`}
-                      >
-                        <GameIcon asset={item.asset} size={14} />
-                        <span>{t(locale, item.nameKey as TranslationKey)}</span>
-                        <small>({t(locale, RARITY_KEY_MAP[item.rarity])})</small>
+                      <span className={`game-tag game-tag-danger-${activeCreature.dangerTier}`}>
+                        {t(locale, DANGER_TIER_KEY_MAP[activeCreature.dangerTier])}
                       </span>
-                    ))}
+                    </div>
+                    <div className="bestiary-sub-line">
+                      {t(locale, 'stats.level')} {activeCreature.minLevel}+ •{' '}
+                      {t(locale, 'bestiary.discoveryStatus')}
+                    </div>
+                    <ProgressBar
+                      variant="skill"
+                      percent={0}
+                      valueText={t(locale, 'bestiary.stageLocked')}
+                    />
                   </div>
                 </div>
 
-                <div className="stat-box" data-testid="bestiary-charms-box">
-                  <dt>{t(locale, 'bestiary.charmsTitle')}</dt>
-                  <dd style={{ fontSize: '0.85rem', fontWeight: 400 }}>
-                    {t(locale, 'bestiary.charmsNotice')}
-                  </dd>
+                <dl className="mmo-stat-list">
+                  <StatRow
+                    testId="bestiary-kill-count"
+                    label={t(locale, 'bestiary.killCountLabel')}
+                    value="0"
+                  />
+                  <StatRow
+                    testId="bestiary-stage-status"
+                    label={t(locale, 'bestiary.charmsTitle')}
+                    value={t(locale, 'bestiary.stageLocked')}
+                    muted
+                  />
+                </dl>
+
+                <div className="subwindow-section">
+                  <div className="subwindow-title">{t(locale, 'hunt.potentialLoot')}</div>
+                  <div className="loot-slots-row">
+                    {activeCreature.lootPreview.map((item) => {
+                      const itemName = t(locale, item.nameKey as TranslationKey);
+                      return (
+                        <div
+                          key={item.id}
+                          data-testid={`bestiary-loot-${item.id}`}
+                          className="loot-slot-cell"
+                        >
+                          <ItemSlot
+                            slotId={item.id}
+                            label={`${itemName} (${t(locale, RARITY_KEY_MAP[item.rarity])})`}
+                            asset={item.asset}
+                            category="item"
+                            state="occupied"
+                            rarity={item.rarity}
+                            selected={selectedLootItem?.id === item.id}
+                            onSelect={() => setSelectedLootItem(item)}
+                          />
+                          <span className="loot-slot-inline-name">{itemName}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {lootTooltip && (
+                  <GameTooltip
+                    data={lootTooltip}
+                    closeLabel={t(locale, 'tooltip.close')}
+                    onClose={() => setSelectedLootItem(null)}
+                    testId="bestiary-loot-tooltip"
+                  />
+                )}
+
+                <div className="subwindow-section" data-testid="bestiary-charms-box">
+                  <div className="subwindow-title">{t(locale, 'bestiary.charmsTitle')}</div>
+                  <p className="window-muted-note">{t(locale, 'bestiary.charmsNotice')}</p>
+                  <p className="window-muted-note">{t(locale, 'bestiary.loreNotice')}</p>
                 </div>
               </div>
             ) : (
-              <p>{t(locale, 'bestiary.selectPrompt')}</p>
+              <p className="window-muted-note">{t(locale, 'bestiary.selectPrompt')}</p>
             )}
           </div>
         )}
-      </div>
-    </section>
+      </GameWindow>
+    </div>
   );
 }

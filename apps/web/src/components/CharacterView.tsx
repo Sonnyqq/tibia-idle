@@ -1,7 +1,13 @@
 import { type CharacterDto } from '@tibia-idle/contracts';
 import { type SupportedLocale, t } from '@tibia-idle/i18n';
 import { GameIcon } from '../assets/assetRegistry.js';
-import { formatStatNumber, VOCATION_ICON_MAP, VOCATION_KEY_MAP } from '../lib/format.js';
+import {
+  computeXpBarProgress,
+  formatStatNumber,
+  VOCATION_ICON_MAP,
+  VOCATION_KEY_MAP
+} from '../lib/format.js';
+import { GameWindow, StatRow } from './ui/GameUi.js';
 
 export interface CharacterViewProps {
   locale: SupportedLocale;
@@ -9,82 +15,169 @@ export interface CharacterViewProps {
 }
 
 export function CharacterView({ locale, character }: CharacterViewProps) {
+  const xpProgress = computeXpBarProgress(character.stats.level, character.stats.xp);
+  const sharedMeleeHint = t(locale, 'stats.skillSharedNote');
+
   return (
-    <section data-testid="character-view" className="center-panel">
-      <div className="panel-card">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.75rem' }}>
-          <GameIcon iconKey={VOCATION_ICON_MAP[character.vocation]} size={26} />
-          <div>
-            <h2 style={{ margin: 0 }}>{character.name}</h2>
-            <small style={{ color: 'var(--text-muted)' }}>
+    <div data-testid="character-view" className="workspace-stack">
+      <GameWindow
+        title={`${t(locale, 'window.skills')} — ${character.name}`}
+        iconKey={VOCATION_ICON_MAP[character.vocation]}
+        iconCategory="vocation"
+        collapsible
+        minimizeLabel={t(locale, 'window.minimize')}
+        expandLabel={t(locale, 'window.expand')}
+      >
+        <div className="char-banner-bar">
+          <div className="char-avatar-box">
+            <GameIcon
+              iconKey={VOCATION_ICON_MAP[character.vocation]}
+              category="vocation"
+              size={20}
+            />
+          </div>
+          <div className="char-banner-meta">
+            <h2 className="char-banner-name">{character.name}</h2>
+            <p className="char-banner-sub">
               {t(locale, VOCATION_KEY_MAP[character.vocation])} • {t(locale, 'stats.level')}{' '}
               {character.stats.level}
-            </small>
+            </p>
           </div>
         </div>
 
-        <h3>{t(locale, 'character.attributesTitle')}</h3>
-        <dl className="stats-grid">
-          <div className="stat-box" data-testid="char-sheet-level">
-            <dt>{t(locale, 'stats.level')}</dt>
-            <dd>{character.stats.level}</dd>
+        <div className="skills-two-col">
+          <div>
+            <div className="subwindow-title">{t(locale, 'character.attributesTitle')}</div>
+            <dl className="mmo-stat-list">
+              <StatRow
+                testId="char-sheet-level"
+                label={t(locale, 'stats.level')}
+                value={character.stats.level}
+                subBarVariant="xp"
+                subBarPercent={xpProgress.percent}
+                highlight
+              />
+              <StatRow
+                testId="char-sheet-xp"
+                label={t(locale, 'stats.xp')}
+                value={formatStatNumber(character.stats.xp, locale)}
+              />
+              <StatRow
+                testId="char-sheet-hp"
+                label={t(locale, 'stats.hp')}
+                value={`${character.stats.hp} / ${character.stats.maxHp}`}
+              />
+              <StatRow
+                testId="char-sheet-mp"
+                label={t(locale, 'stats.mp')}
+                value={`${character.stats.mp} / ${character.stats.maxMp}`}
+              />
+              <StatRow
+                testId="char-sheet-gold"
+                label={t(locale, 'stats.gold')}
+                value={formatStatNumber(character.stats.gold, locale)}
+                highlight
+              />
+              <StatRow
+                testId="char-sheet-capacity"
+                label={t(locale, 'stats.capacity')}
+                value={t(locale, 'stats.unavailable')}
+                muted
+              />
+              <StatRow
+                testId="char-sheet-speed"
+                label={t(locale, 'stats.speed')}
+                value={t(locale, 'stats.unavailable')}
+                muted
+              />
+            </dl>
           </div>
-          <div className="stat-box" data-testid="char-sheet-xp">
-            <dt>{t(locale, 'stats.xp')}</dt>
-            <dd>{formatStatNumber(character.stats.xp, locale)}</dd>
-          </div>
-          <div className="stat-box" data-testid="char-sheet-hp">
-            <dt>{t(locale, 'stats.hp')}</dt>
-            <dd>
-              {character.stats.hp} / {character.stats.maxHp}
-            </dd>
-          </div>
-          <div className="stat-box" data-testid="char-sheet-mp">
-            <dt>{t(locale, 'stats.mp')}</dt>
-            <dd>
-              {character.stats.mp} / {character.stats.maxMp}
-            </dd>
-          </div>
-          <div className="stat-box" data-testid="char-sheet-gold">
-            <dt>{t(locale, 'stats.gold')}</dt>
-            <dd>{formatStatNumber(character.stats.gold, locale)}</dd>
-          </div>
-          <div className="stat-box" data-testid="char-sheet-melee">
-            <dt>{t(locale, 'stats.melee')}</dt>
-            <dd>{character.stats.melee}</dd>
-          </div>
-          <div className="stat-box" data-testid="char-sheet-distance">
-            <dt>{t(locale, 'stats.distance')}</dt>
-            <dd>{character.stats.distance}</dd>
-          </div>
-          <div className="stat-box" data-testid="char-sheet-magic">
-            <dt>{t(locale, 'stats.magic')}</dt>
-            <dd>{character.stats.magic}</dd>
-          </div>
-          <div className="stat-box" data-testid="char-sheet-shielding">
-            <dt>{t(locale, 'stats.shielding')}</dt>
-            <dd>{character.stats.shielding}</dd>
-          </div>
-        </dl>
-      </div>
 
-      <div className="panel-card" data-testid="character-talents-panel">
-        <h3>{t(locale, 'character.talentsTitle')}</h3>
-        <p style={{ marginTop: 0, color: 'var(--text-muted)' }}>
-          {t(locale, 'character.talentsPendingNotice')}
-        </p>
-        <div className="stats-grid">
-          <div className="sub-card" data-testid="talent-slot-1">
+          <div>
+            <div className="subwindow-title">{t(locale, 'window.skills')}</div>
+            <dl className="mmo-stat-list">
+              <StatRow
+                testId="char-sheet-magic"
+                label={t(locale, 'stats.magic')}
+                value={character.stats.magic}
+                subBarVariant="skill"
+                subBarPercent={0}
+              />
+              <StatRow
+                testId="char-sheet-melee"
+                label={t(locale, 'stats.melee')}
+                value={character.stats.melee}
+                subBarVariant="skill"
+                subBarPercent={0}
+              />
+              <StatRow
+                testId="char-sheet-sword"
+                label={t(locale, 'stats.sword')}
+                value={character.stats.melee}
+                subBarVariant="skill"
+                subBarPercent={0}
+                title={sharedMeleeHint}
+              />
+              <StatRow
+                testId="char-sheet-axe"
+                label={t(locale, 'stats.axe')}
+                value={character.stats.melee}
+                subBarVariant="skill"
+                subBarPercent={0}
+                title={sharedMeleeHint}
+              />
+              <StatRow
+                testId="char-sheet-club"
+                label={t(locale, 'stats.club')}
+                value={character.stats.melee}
+                subBarVariant="skill"
+                subBarPercent={0}
+                title={sharedMeleeHint}
+              />
+              <StatRow
+                testId="char-sheet-distance"
+                label={t(locale, 'stats.distance')}
+                value={character.stats.distance}
+                subBarVariant="skill"
+                subBarPercent={0}
+              />
+              <StatRow
+                testId="char-sheet-shielding"
+                label={t(locale, 'stats.shielding')}
+                value={character.stats.shielding}
+                subBarVariant="skill"
+                subBarPercent={0}
+              />
+            </dl>
+            <p className="window-muted-note">{sharedMeleeHint}</p>
+          </div>
+        </div>
+      </GameWindow>
+
+      <GameWindow
+        title={t(locale, 'character.talentsTitle')}
+        iconKey="orb"
+        collapsible
+        minimizeLabel={t(locale, 'window.minimize')}
+        expandLabel={t(locale, 'window.expand')}
+        testId="character-talents-panel"
+      >
+        <p className="window-muted-note">{t(locale, 'character.talentsPendingNotice')}</p>
+        <div className="talents-row">
+          <div className="talent-slot-box" data-testid="talent-slot-1">
+            <GameIcon iconKey="shield" size={14} />
             <strong>{t(locale, 'character.talentSlotTier1')}</strong>
           </div>
-          <div className="sub-card" data-testid="talent-slot-2">
+          <div className="talent-slot-box" data-testid="talent-slot-2">
+            <GameIcon iconKey="swords" size={14} />
             <strong>{t(locale, 'character.talentSlotTier2')}</strong>
           </div>
-          <div className="sub-card" data-testid="talent-slot-3">
+          <div className="talent-slot-box" data-testid="talent-slot-3">
+            <GameIcon iconKey="orb" size={14} />
             <strong>{t(locale, 'character.talentSlotTier3')}</strong>
           </div>
         </div>
-      </div>
-    </section>
+      </GameWindow>
+    </div>
   );
 }

@@ -8,6 +8,7 @@ import {
   VOCATION_ICON_MAP,
   VOCATION_KEY_MAP
 } from '../lib/format.js';
+import { GameButton, GameWindow, ProgressBar, StatRow } from './ui/GameUi.js';
 
 export interface DashboardViewProps {
   locale: SupportedLocale;
@@ -33,140 +34,184 @@ export function DashboardView({
       : 0;
 
   return (
-    <section data-testid="character-dashboard" className="center-panel">
-      <div className="panel-card">
-        <div
-          style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            gap: '0.5rem',
-            marginBottom: '0.75rem'
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <GameIcon iconKey={VOCATION_ICON_MAP[character.vocation]} size={24} />
-            <div>
-              <h2 data-testid="dashboard-character-name" style={{ margin: 0 }}>
-                {character.name}
-              </h2>
-              <p data-testid="dashboard-vocation" style={{ margin: 0, fontSize: '0.85rem' }}>
-                {t(locale, 'character.vocationLabel')}:{' '}
-                <strong>{t(locale, VOCATION_KEY_MAP[character.vocation])}</strong>
-              </p>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            className="btn"
-            data-testid="back-to-characters-button"
+    <div data-testid="character-dashboard" className="workspace-stack">
+      <GameWindow
+        title={t(locale, 'window.characterStatus')}
+        iconKey={VOCATION_ICON_MAP[character.vocation]}
+        iconCategory="vocation"
+        collapsible
+        minimizeLabel={t(locale, 'window.minimize')}
+        expandLabel={t(locale, 'window.expand')}
+        headerRight={
+          <GameButton
+            size="sm"
+            testId="back-to-characters-button"
             onClick={onSwitchCharacter}
           >
             {t(locale, 'character.backToList')}
-          </button>
+          </GameButton>
+        }
+      >
+        <div className="char-banner-bar">
+          <div className="char-avatar-box">
+            <GameIcon
+              iconKey={VOCATION_ICON_MAP[character.vocation]}
+              category="vocation"
+              size={22}
+            />
+          </div>
+          <div className="char-banner-meta">
+            <h2 data-testid="dashboard-character-name" className="char-banner-name">
+              {character.name}
+            </h2>
+            <p data-testid="dashboard-vocation" className="char-banner-sub">
+              {t(locale, 'character.vocationLabel')}:{' '}
+              <strong>{t(locale, VOCATION_KEY_MAP[character.vocation])}</strong> •{' '}
+              {t(locale, 'stats.level')} <strong>{character.stats.level}</strong>
+            </p>
+          </div>
         </div>
 
-        <div className="sub-card" style={{ marginBottom: '0.75rem' }} data-testid="xp-progress-card">
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem' }}>
-            <span>
-              {t(locale, 'stats.level')} <strong>{character.stats.level}</strong> —{' '}
-              {t(locale, 'stats.xpProgress')}
-            </span>
-            <span data-testid="xp-progress-label">
-              {formatStatNumber(xpProgress.currentXp, locale)} /{' '}
-              {formatStatNumber(xpProgress.nextLevelXp, locale)} ({xpProgress.percent}%)
-            </span>
-          </div>
-          <div className="progress-track" role="progressbar" aria-valuenow={xpProgress.percent}>
-            <div className="progress-fill-xp" style={{ width: `${xpProgress.percent}%` }} />
+        <div className="vitals-bars-panel" data-testid="xp-progress-card">
+          <ProgressBar
+            variant="hp"
+            percent={hpPercent}
+            label={t(locale, 'stats.hp')}
+            valueText={`${character.stats.hp} / ${character.stats.maxHp}`}
+          />
+          <ProgressBar
+            variant="mana"
+            percent={mpPercent}
+            label={t(locale, 'stats.mp')}
+            valueText={`${character.stats.mp} / ${character.stats.maxMp}`}
+          />
+          <div className="xp-bar-wrapper">
+            <div className="game-progress-meta">
+              <span className="game-progress-label">
+                {t(locale, 'stats.level')} {character.stats.level} — {t(locale, 'stats.xpProgress')}
+              </span>
+              <span className="game-progress-value" data-testid="xp-progress-label">
+                {formatStatNumber(xpProgress.currentXp, locale)} /{' '}
+                {formatStatNumber(xpProgress.nextLevelXp, locale)} ({xpProgress.percent}%)
+              </span>
+            </div>
+            <ProgressBar variant="xp" percent={xpProgress.percent} />
           </div>
         </div>
 
-        <dl className="stats-grid">
-          <div className="stat-box" data-testid="stat-level">
-            <dt>{t(locale, 'stats.level')}</dt>
-            <dd>{character.stats.level}</dd>
-          </div>
-          <div className="stat-box" data-testid="stat-xp">
-            <dt>{t(locale, 'stats.xp')}</dt>
-            <dd>{formatStatNumber(character.stats.xp, locale)}</dd>
-          </div>
-          <div className="stat-box" data-testid="stat-hp">
-            <dt>{t(locale, 'stats.hp')}</dt>
-            <dd>
-              {character.stats.hp} / {character.stats.maxHp}
-              <div className="progress-track">
-                <div className="progress-fill-hp" style={{ width: `${hpPercent}%` }} />
-              </div>
-            </dd>
-          </div>
-          <div className="stat-box" data-testid="stat-mp">
-            <dt>{t(locale, 'stats.mp')}</dt>
-            <dd>
-              {character.stats.mp} / {character.stats.maxMp}
-              <div className="progress-track">
-                <div className="progress-fill-mp" style={{ width: `${mpPercent}%` }} />
-              </div>
-            </dd>
-          </div>
-          <div className="stat-box" data-testid="stat-gold">
-            <dt>{t(locale, 'stats.gold')}</dt>
-            <dd>{formatStatNumber(character.stats.gold, locale)}</dd>
-          </div>
-          <div className="stat-box" data-testid="stat-melee">
-            <dt>{t(locale, 'stats.melee')}</dt>
-            <dd>{character.stats.melee}</dd>
-          </div>
-          <div className="stat-box" data-testid="stat-distance">
-            <dt>{t(locale, 'stats.distance')}</dt>
-            <dd>{character.stats.distance}</dd>
-          </div>
-          <div className="stat-box" data-testid="stat-magic">
-            <dt>{t(locale, 'stats.magic')}</dt>
-            <dd>{character.stats.magic}</dd>
-          </div>
-          <div className="stat-box" data-testid="stat-shielding">
-            <dt>{t(locale, 'stats.shielding')}</dt>
-            <dd>{character.stats.shielding}</dd>
-          </div>
+        <dl className="mmo-stat-columns">
+          <StatRow
+            testId="stat-level"
+            label={t(locale, 'stats.level')}
+            value={character.stats.level}
+            highlight
+          />
+          <StatRow
+            testId="stat-xp"
+            label={t(locale, 'stats.xp')}
+            value={formatStatNumber(character.stats.xp, locale)}
+          />
+          <StatRow
+            testId="stat-hp"
+            label={t(locale, 'stats.hp')}
+            value={`${character.stats.hp} / ${character.stats.maxHp}`}
+          />
+          <StatRow
+            testId="stat-mp"
+            label={t(locale, 'stats.mp')}
+            value={`${character.stats.mp} / ${character.stats.maxMp}`}
+          />
+          <StatRow
+            testId="stat-gold"
+            label={t(locale, 'stats.gold')}
+            value={formatStatNumber(character.stats.gold, locale)}
+            highlight
+          />
+          <StatRow
+            testId="stat-melee"
+            label={t(locale, 'stats.melee')}
+            value={character.stats.melee}
+          />
+          <StatRow
+            testId="stat-distance"
+            label={t(locale, 'stats.distance')}
+            value={character.stats.distance}
+          />
+          <StatRow
+            testId="stat-magic"
+            label={t(locale, 'stats.magic')}
+            value={character.stats.magic}
+          />
+          <StatRow
+            testId="stat-shielding"
+            label={t(locale, 'stats.shielding')}
+            value={character.stats.shielding}
+          />
         </dl>
-      </div>
+      </GameWindow>
 
-      <div className="panel-card" data-testid="dashboard-activity-card">
-        <h3>{t(locale, 'dashboard.activityTitle')}</h3>
-        <p data-testid="dashboard-activity-status" style={{ margin: '0 0 0.75rem 0' }}>
-          {t(locale, 'dashboard.idleStatus')}
-        </p>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-          <button
-            type="button"
-            className="btn btn-primary"
-            data-testid="quick-goto-hunts"
-            onClick={() => onNavigateTab('hunts')}
-          >
-            <GameIcon iconKey="swords" size={16} />
-            <span>{t(locale, 'dashboard.goToHunts')}</span>
-          </button>
-          <button
-            type="button"
-            className="btn"
-            data-testid="quick-goto-inventory"
-            onClick={() => onNavigateTab('inventory')}
-          >
-            <GameIcon iconKey="chest" size={16} />
-            <span>{t(locale, 'dashboard.goToInventory')}</span>
-          </button>
-        </div>
-      </div>
+      <div className="dashboard-split-windows">
+        <GameWindow
+          title={t(locale, 'dashboard.activityTitle')}
+          iconKey="swords"
+          collapsible
+          minimizeLabel={t(locale, 'window.minimize')}
+          expandLabel={t(locale, 'window.expand')}
+          testId="dashboard-activity-card"
+        >
+          <dl className="mmo-stat-list">
+            <StatRow
+              label={t(locale, 'dashboard.activityTitle')}
+              value={
+                <span data-testid="dashboard-activity-status">{t(locale, 'dashboard.idleStatus')}</span>
+              }
+            />
+            <StatRow
+              label={t(locale, 'nav.hunts')}
+              value={t(locale, 'status.enginePending')}
+              muted
+            />
+          </dl>
+          <div className="window-action-strip">
+            <GameButton
+              variant="primary"
+              testId="quick-goto-hunts"
+              onClick={() => onNavigateTab('hunts')}
+            >
+              <GameIcon iconKey="swords" size={14} />
+              <span>{t(locale, 'dashboard.goToHunts')}</span>
+            </GameButton>
+            <GameButton
+              testId="quick-goto-inventory"
+              onClick={() => onNavigateTab('inventory')}
+            >
+              <GameIcon iconKey="chest" size={14} />
+              <span>{t(locale, 'dashboard.goToInventory')}</span>
+            </GameButton>
+            <GameButton
+              testId="quick-goto-bestiary"
+              onClick={() => onNavigateTab('bestiary')}
+            >
+              <GameIcon iconKey="skull" size={14} />
+              <span>{t(locale, 'dashboard.goToBestiary')}</span>
+            </GameButton>
+          </div>
+        </GameWindow>
 
-      <div className="panel-card" data-testid="dashboard-events-card">
-        <h3>{t(locale, 'dashboard.recentEvents')}</h3>
-        <p data-testid="dashboard-no-events" style={{ margin: 0, color: 'var(--text-muted)' }}>
-          {t(locale, 'dashboard.noEventsYet')}
-        </p>
+        <GameWindow
+          title={t(locale, 'dashboard.recentEvents')}
+          iconKey="crest"
+          collapsible
+          minimizeLabel={t(locale, 'window.minimize')}
+          expandLabel={t(locale, 'window.expand')}
+          testId="dashboard-events-card"
+        >
+          <p data-testid="dashboard-no-events" className="window-muted-note">
+            {t(locale, 'dashboard.noEventsYet')}
+          </p>
+          <p className="window-muted-note">{t(locale, 'dashboard.serverAuthorityNote')}</p>
+        </GameWindow>
       </div>
-    </section>
+    </div>
   );
 }
