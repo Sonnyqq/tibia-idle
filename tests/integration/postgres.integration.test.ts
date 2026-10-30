@@ -19,21 +19,25 @@ describe('PostgreSQL live database integration', () => {
       const healthy = await checkDatabaseHealth(pool);
       expect(healthy).toBe(true);
 
-      await pool.query('DROP TABLE IF EXISTS schema_migrations');
+      await pool.query(
+        'DROP TABLE IF EXISTS characters, sessions, users, schema_migrations CASCADE'
+      );
 
       const migrations = loadMigrationsFromDir();
       const firstRun = await applyMigrations(pool, migrations);
-      expect(firstRun).toEqual(['0001_schema_migrations']);
+      expect(firstRun).toEqual(['0001_schema_migrations', '0002_auth_sessions_characters']);
 
       const secondRun = await applyMigrations(pool, migrations);
       expect(secondRun).toEqual([]);
 
       const ledgerRows = await pool.query<{ version: string; checksum: string }>(
-        'SELECT version, checksum FROM schema_migrations'
+        'SELECT version, checksum FROM schema_migrations ORDER BY version ASC'
       );
-      expect(ledgerRows.rows).toHaveLength(1);
+      expect(ledgerRows.rows).toHaveLength(2);
       expect(ledgerRows.rows[0]?.version).toBe('0001_schema_migrations');
       expect(ledgerRows.rows[0]?.checksum).toBe(migrations[0]?.checksum);
+      expect(ledgerRows.rows[1]?.version).toBe('0002_auth_sessions_characters');
+      expect(ledgerRows.rows[1]?.checksum).toBe(migrations[1]?.checksum);
 
       const tamperedMigrations = [
         {
@@ -43,10 +47,12 @@ describe('PostgreSQL live database integration', () => {
           checksum: computeMigrationChecksum('-- tampered sql')
         },
         {
-          version: '0002_rollback_check',
-          filename: '0002_rollback_check.sql',
+          version: '0003_rollback_check',
+          filename: '0003_rollback_check.sql',
           sql: 'CREATE TABLE rollback_probe_table (id INT PRIMARY KEY);',
-          checksum: computeMigrationChecksum('CREATE TABLE rollback_probe_table (id INT PRIMARY KEY);')
+          checksum: computeMigrationChecksum(
+            'CREATE TABLE rollback_probe_table (id INT PRIMARY KEY);'
+          )
         }
       ];
 
