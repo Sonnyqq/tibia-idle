@@ -18,6 +18,9 @@ export interface MigrationDefinition {
   checksum: string;
 }
 
+export const DEFAULT_LOCAL_DATABASE_URL =
+  'postgresql://tibia_idle:tibia_idle_dev@127.0.0.1:5432/tibia_idle_test';
+
 export function parseDatabaseConfig(env: NodeJS.ProcessEnv = process.env): DatabaseConfig | null {
   const rawUrl = env['DATABASE_URL']?.trim();
   if (!rawUrl) {
@@ -36,6 +39,21 @@ export function parseDatabaseConfig(env: NodeJS.ProcessEnv = process.env): Datab
     connectionString: rawUrl,
     maxConnections: 10,
     connectionTimeoutMs: 5000
+  };
+}
+
+export function resolveTestDatabaseConfig(env: NodeJS.ProcessEnv = process.env): DatabaseConfig {
+  const explicit = parseDatabaseConfig(env);
+  if (explicit) {
+    return explicit;
+  }
+  if (env['REQUIRE_DB_TESTS'] === '1') {
+    throw new Error('REQUIRE_DB_TESTS=1 requires explicit DATABASE_URL environment variable');
+  }
+  return {
+    connectionString: DEFAULT_LOCAL_DATABASE_URL,
+    maxConnections: 5,
+    connectionTimeoutMs: 3000
   };
 }
 

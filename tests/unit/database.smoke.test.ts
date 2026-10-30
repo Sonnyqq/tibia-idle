@@ -2,6 +2,7 @@ import {
   computeMigrationChecksum,
   loadMigrationsFromDir,
   parseDatabaseConfig,
+  resolveTestDatabaseConfig,
   validateMigrationsOrder
 } from '@tibia-idle/database';
 import { describe, expect, it } from 'vitest';
@@ -19,6 +20,12 @@ describe('@tibia-idle/database smoke tests', () => {
         DATABASE_URL: 'mysql://root@127.0.0.1:3306/db'
       })
     ).toThrow(/postgres/);
+
+    expect(() =>
+      resolveTestDatabaseConfig({
+        REQUIRE_DB_TESTS: '1'
+      })
+    ).toThrow(/REQUIRE_DB_TESTS=1 requires explicit DATABASE_URL/);
   });
 
   it('loads and validates ordered SQL migrations with deterministic checksums', () => {

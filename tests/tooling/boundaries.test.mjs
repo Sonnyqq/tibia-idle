@@ -65,3 +65,15 @@ test('root package.json scripts contain no dummy echo/true no-ops', () => {
     assert.doesNotMatch(cmd, /\b(echo|true|exit 0)\b/i, `Script ${name} must not be a no-op`);
   }
 });
+
+test('CI workflow requires PostgreSQL service and integration tests contain no skip markers', () => {
+  const workflow = readFileSync(resolve(rootDir, '.github/workflows/verify.yml'), 'utf8');
+  assert.match(workflow, /postgres:\s*\n\s*image:\s*postgres:16-alpine/);
+  assert.match(workflow, /REQUIRE_DB_TESTS:\s*['"]1['"]/);
+
+  const integrationFiles = readdirSync(resolve(rootDir, 'tests/integration')).filter((f) => f.endsWith('.ts'));
+  for (const file of integrationFiles) {
+    const content = readFileSync(resolve(rootDir, 'tests/integration', file), 'utf8');
+    assert.doesNotMatch(content, /\b(it|describe|test)\.(skip|skipIf|todo)\b/, `${file} must not skip tests`);
+  }
+});
