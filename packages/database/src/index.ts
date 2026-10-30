@@ -5,6 +5,21 @@ import pg from 'pg';
 
 const { Pool } = pg;
 
+export {
+  type ActiveSessionRecord,
+  type CreateCharacterDbResult,
+  createCharacterTransactional,
+  createSessionRecord,
+  createUserAccount,
+  findActiveSessionByTokenHash,
+  findCharacterByIdForUser,
+  findUserByEmail,
+  listCharactersForUser,
+  revokeSessionByTokenHash,
+  type StoredUserRecord,
+  updateUserLocale
+} from './auth-repository.js';
+
 export interface DatabaseConfig {
   connectionString: string;
   maxConnections: number;
@@ -52,8 +67,8 @@ export function resolveTestDatabaseConfig(env: NodeJS.ProcessEnv = process.env):
   }
   return {
     connectionString: DEFAULT_LOCAL_DATABASE_URL,
-    maxConnections: 5,
-    connectionTimeoutMs: 3000
+    maxConnections: 10,
+    connectionTimeoutMs: 5000
   };
 }
 
@@ -118,7 +133,10 @@ export function loadMigrationsFromDir(
   return definitions;
 }
 
-export async function applyMigrations(pool: pg.Pool, migrations: readonly MigrationDefinition[]): Promise<string[]> {
+export async function applyMigrations(
+  pool: pg.Pool,
+  migrations: readonly MigrationDefinition[]
+): Promise<string[]> {
   validateMigrationsOrder(migrations);
   const client = await pool.connect();
   const appliedNow: string[] = [];
