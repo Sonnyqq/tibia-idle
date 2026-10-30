@@ -2,9 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test } from '@playwright/test';
 
-const SCREENSHOT_DIR =
-  process.env.SCREENSHOT_OUTPUT_DIR ??
-  'C:/Users/denis/.gemini/antigravity/brain/1936c148-66b3-4ae4-befd-74d093776eac/screenshots';
+const SCREENSHOT_DIR = process.env.SCREENSHOT_OUTPUT_DIR ?? 'test-results/screenshots';
 
 test('completes full Tibia-client responsive PC (1440x900, 1280x800) & mobile (768px, 390px, 320px) flow, all 5 screens, console log, tooltips, PL/EN switch, F5 reload, and captures 10 visual QA screenshots', async ({
   page
