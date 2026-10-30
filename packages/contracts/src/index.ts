@@ -1,7 +1,7 @@
 import { SUPPORTED_LOCALES } from '@tibia-idle/i18n';
 import { z } from 'zod';
 
-export const CONTRACT_VERSION = '0.2.0' as const;
+export const CONTRACT_VERSION = '0.3.0' as const;
 
 export const LocaleSchema = z.enum(SUPPORTED_LOCALES);
 export type LocaleDto = z.infer<typeof LocaleSchema>;
@@ -9,6 +9,80 @@ export type LocaleDto = z.infer<typeof LocaleSchema>;
 export const VOCATIONS = ['knight', 'paladin', 'sorcerer', 'druid'] as const;
 export const VocationSchema = z.enum(VOCATIONS);
 export type VocationDto = z.infer<typeof VocationSchema>;
+
+export const EQUIPMENT_SLOTS = [
+  'helmet',
+  'amulet',
+  'weapon',
+  'armor',
+  'shield',
+  'ring',
+  'legs',
+  'boots',
+  'ammunition'
+] as const;
+export const EquipmentSlotSchema = z.enum(EQUIPMENT_SLOTS);
+export type EquipmentSlotDto = z.infer<typeof EquipmentSlotSchema>;
+
+export const AssetCategorySchema = z.enum([
+  'vocation',
+  'zone',
+  'creature',
+  'item',
+  'slot',
+  'ui'
+]);
+export type AssetCategoryDto = z.infer<typeof AssetCategorySchema>;
+
+export const AssetRefDtoSchema = z.object({
+  assetId: z.string().min(1),
+  category: AssetCategorySchema,
+  fallbackIconKey: z.string().min(1)
+});
+export type AssetRefDto = z.infer<typeof AssetRefDtoSchema>;
+
+export const ItemRaritySchema = z.enum(['common', 'uncommon', 'rare']);
+export type ItemRarityDto = z.infer<typeof ItemRaritySchema>;
+
+export const DangerTierSchema = z.enum(['low', 'medium', 'high']);
+export type DangerTierDto = z.infer<typeof DangerTierSchema>;
+
+export const LootPreviewItemDtoSchema = z.object({
+  id: z.string().min(1),
+  nameKey: z.string().min(1),
+  rarity: ItemRaritySchema,
+  asset: AssetRefDtoSchema
+});
+export type LootPreviewItemDto = z.infer<typeof LootPreviewItemDtoSchema>;
+
+export const CreatureCatalogDtoSchema = z.object({
+  id: z.string().min(1),
+  nameKey: z.string().min(1),
+  minLevel: z.number().int().min(1),
+  dangerTier: DangerTierSchema,
+  asset: AssetRefDtoSchema,
+  lootPreview: z.array(LootPreviewItemDtoSchema)
+});
+export type CreatureCatalogDto = z.infer<typeof CreatureCatalogDtoSchema>;
+
+export const ZoneCatalogDtoSchema = z.object({
+  id: z.string().min(1),
+  nameKey: z.string().min(1),
+  enemyTypesKey: z.string().min(1),
+  minLevel: z.number().int().min(1),
+  recommendedLevelRange: z.string().min(1),
+  expPerHourEstimate: z.number().nullable(),
+  goldPerHourEstimate: z.number().nullable(),
+  asset: AssetRefDtoSchema,
+  creatures: z.array(CreatureCatalogDtoSchema)
+});
+export type ZoneCatalogDto = z.infer<typeof ZoneCatalogDtoSchema>;
+
+export const ZonesCatalogResponseSchema = z.object({
+  zones: z.array(ZoneCatalogDtoSchema),
+  simulationEnabled: z.boolean()
+});
+export type ZonesCatalogResponseDto = z.infer<typeof ZonesCatalogResponseSchema>;
 
 export const EmailSchema = z
   .string()
