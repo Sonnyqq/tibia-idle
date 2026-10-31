@@ -7,7 +7,7 @@ import {
 } from '@tibia-idle/contracts';
 import { type SupportedLocale, type TranslationKey } from '@tibia-idle/i18n';
 
-export type GameTabId = 'dashboard' | 'hunts' | 'character' | 'inventory' | 'bestiary';
+export type GameTabId = 'dashboard' | 'hunts' | 'character' | 'inventory' | 'shop' | 'bestiary';
 
 export interface GameTabDefinition {
   readonly id: GameTabId;
@@ -45,6 +45,13 @@ export const GAME_TABS: readonly GameTabDefinition[] = [
     mobileTestId: 'mobile-nav-inventory',
     labelKey: 'nav.inventory',
     iconKey: 'chest'
+  },
+  {
+    id: 'shop',
+    navTestId: 'nav.shop',
+    mobileTestId: 'mobile-nav-shop',
+    labelKey: 'nav.shop',
+    iconKey: 'potion'
   },
   {
     id: 'bestiary',

@@ -66,6 +66,7 @@ describe('@tibia-idle/web unit tests (Tibia client components, navigation, asset
       'hunts',
       'character',
       'inventory',
+      'shop',
       'bestiary'
     ]);
     expect(isGameTabId('bestiary')).toBe(true);

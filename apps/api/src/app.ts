@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import {
   ActiveHuntResponseSchema,
   ApiErrorSchema,
+  BuyNpcProductRequestSchema,
+  BuyNpcProductResponseSchema,
   CharacterContainersResponseSchema,
   CharacterDtoSchema,
   CharacterEquipmentResponseSchema,
@@ -19,9 +21,13 @@ import {
   LoginRequestSchema,
   MoveInventoryItemRequestSchema,
   MoveInventoryItemResponseSchema,
+  NpcShopCatalogResponseSchema,
+  NpcShopHistoryResponseSchema,
   PublicHuntSessionViewSchema,
   ReadinessResponseSchema,
   RegisterRequestSchema,
+  SellNpcItemRequestSchema,
+  SellNpcItemResponseSchema,
   SessionMeResponseSchema,
   SettleHuntRequestSchema,
   SettleHuntResponseSchema,
@@ -39,6 +45,7 @@ import {
 } from '@tibia-idle/contracts';
 import {
   type ActiveSessionRecord,
+  buyNpcProduct,
   claimHuntReward,
   createCharacterTransactional,
   createSessionRecord,
@@ -54,9 +61,12 @@ import {
   getCharacterInventory,
   getHuntByIdForUser,
   getHuntSegmentsWithSummary,
+  getNpcTransactionsForCharacter,
   listCharactersForUser,
   moveInventoryItem,
+  NpcShopError,
   revokeSessionByTokenHash,
+  sellNpcInventoryItem,
   settleHunt,
   splitInventoryStack,
   startHunt,
@@ -68,8 +78,12 @@ import {
   type Clock,
   type CombatSimulationConfig,
   createSystemClock,
+  DEFAULT_NPC_MERCHANT,
   INITIAL_ZONES_CATALOG,
   MAX_CHARACTERS_PER_ACCOUNT,
+  NPC_BUY_OFFERS,
+  NPC_SELL_OFFERS,
+  NPC_SHOP_CATALOG_VERSION,
   SIMULATION_VERSION
 } from '@tibia-idle/domain';
 import { DEFAULT_LOCALE, getDictionary } from '@tibia-idle/i18n';
@@ -157,6 +171,11 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
   const inventoryRateLimiter = new SlidingWindowRateLimiter({
     maxAttempts: options.inventoryRateLimitMax ?? 120,
     windowMs: options.inventoryRateLimitWindowMs ?? 60_000
+  });
+
+  const npcShopRateLimiter = new SlidingWindowRateLimiter({
+    maxAttempts: 120,
+    windowMs: 60_000
   });
 
   const app = Fastify({
@@ -1479,6 +1498,181 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
       return sendApiError(reply, request, 400, 'TARGET_SLOT_OCCUPIED', 'error.targetSlotOccupied');
     }
     return sendApiError(reply, request, 404, 'CHARACTER_NOT_FOUND', 'error.characterNotFound');
+  });
+
+  function mapNpcShopErrorCodeToMessageKey(code: string): string {
+    switch (code) {
+      case 'INSUFFICIENT_GOLD':
+        return 'error.insufficientGold';
+      case 'POTION_LIMIT_EXCEEDED':
+        return 'error.potionLimitExceeded';
+      case 'ITEM_NOT_SELLABLE':
+        return 'error.itemNotSellable';
+      case 'INSUFFICIENT_ITEMS':
+        return 'error.insufficientItems';
+      case 'NPC_OFFER_NOT_FOUND':
+        return 'error.npcOfferNotFound';
+      case 'ACTIVE_HUNT_LOCKED':
+        return 'error.activeHuntShopLocked';
+      case 'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD':
+        return 'error.idempotencyConflict';
+      case 'SLOT_INDEX_OUT_OF_BOUNDS':
+        return 'error.slotOutOfBounds';
+      case 'BACKPACK_NOT_FOUND':
+        return 'error.inventoryFull';
+      case 'CHARACTER_NOT_FOUND':
+        return 'error.characterNotFound';
+      default:
+        return 'auth.validationError';
+    }
+  }
+
+  app.get('/npc-shop/catalog', async (_request, reply) => {
+    reply.header('Cache-Control', 'public, max-age=60');
+    return reply.code(200).send(
+      NpcShopCatalogResponseSchema.parse({
+        merchant: {
+          id: DEFAULT_NPC_MERCHANT.id,
+          nameKey: DEFAULT_NPC_MERCHANT.nameKey,
+          greetingKey: DEFAULT_NPC_MERCHANT.greetingKey
+        },
+        buyOffers: NPC_BUY_OFFERS,
+        sellOffers: NPC_SELL_OFFERS,
+        catalogVersion: NPC_SHOP_CATALOG_VERSION
+      })
+    );
+  });
+
+  app.get<{ Params: { id: string } }>('/characters/:id/npc-shop/history', async (request, reply) => {
+    const pool = requirePool(request, reply);
+    if (!pool) return;
+
+    const resolved = await resolveActiveSession(request, pool);
+    if (!resolved) {
+      return sendApiError(reply, request, 401, 'UNAUTHORIZED', 'auth.unauthorized');
+    }
+
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(request.params.id)) {
+      return sendApiError(reply, request, 404, 'CHARACTER_NOT_FOUND', 'error.characterNotFound');
+    }
+
+    const char = await findCharacterByIdForUser(pool, request.params.id, resolved.session.userId);
+    if (!char) {
+      return sendApiError(reply, request, 404, 'CHARACTER_NOT_FOUND', 'error.characterNotFound');
+    }
+
+    const transactions = await getNpcTransactionsForCharacter(pool, char.id, 50);
+    return reply.code(200).send(
+      NpcShopHistoryResponseSchema.parse({
+        characterId: char.id,
+        transactions
+      })
+    );
+  });
+
+  app.post<{ Params: { id: string } }>('/characters/:id/npc-shop/buy', async (request, reply) => {
+    const pool = requirePool(request, reply);
+    if (!pool) return;
+
+    const resolved = await resolveActiveSession(request, pool);
+    if (!resolved) {
+      return sendApiError(reply, request, 401, 'UNAUTHORIZED', 'auth.unauthorized');
+    }
+    if (!verifyCsrfProtection(request, resolved.session)) {
+      return sendApiError(reply, request, 403, 'CSRF_INVALID', 'auth.csrfInvalid');
+    }
+
+    const userRateKey = `shop:user:${resolved.session.userId}`;
+    if (!npcShopRateLimiter.checkAndRecord(userRateKey, clock.nowMs())) {
+      return sendApiError(reply, request, 429, 'RATE_LIMITED', 'hunt.rateLimited');
+    }
+
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(request.params.id)) {
+      return sendApiError(reply, request, 404, 'CHARACTER_NOT_FOUND', 'error.characterNotFound');
+    }
+
+    const char = await findCharacterByIdForUser(pool, request.params.id, resolved.session.userId);
+    if (!char) {
+      return sendApiError(reply, request, 404, 'CHARACTER_NOT_FOUND', 'error.characterNotFound');
+    }
+
+    const parsed = BuyNpcProductRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return sendApiError(reply, request, 400, 'VALIDATION_ERROR', 'auth.validationError');
+    }
+
+    try {
+      const result = await buyNpcProduct(pool, {
+        characterId: char.id,
+        offerId: parsed.data.offerId,
+        quantity: parsed.data.quantity,
+        idempotencyKey: parsed.data.idempotencyKey,
+        nowIso: clock.nowIso()
+      });
+
+      return reply.code(200).send(BuyNpcProductResponseSchema.parse(result));
+    } catch (err) {
+      if (err instanceof NpcShopError) {
+        const messageKey = mapNpcShopErrorCodeToMessageKey(err.code);
+        return sendApiError(reply, request, err.statusCode, err.code, messageKey);
+      }
+      throw err;
+    }
+  });
+
+  app.post<{ Params: { id: string } }>('/characters/:id/npc-shop/sell', async (request, reply) => {
+    const pool = requirePool(request, reply);
+    if (!pool) return;
+
+    const resolved = await resolveActiveSession(request, pool);
+    if (!resolved) {
+      return sendApiError(reply, request, 401, 'UNAUTHORIZED', 'auth.unauthorized');
+    }
+    if (!verifyCsrfProtection(request, resolved.session)) {
+      return sendApiError(reply, request, 403, 'CSRF_INVALID', 'auth.csrfInvalid');
+    }
+
+    const userRateKey = `shop:user:${resolved.session.userId}`;
+    if (!npcShopRateLimiter.checkAndRecord(userRateKey, clock.nowMs())) {
+      return sendApiError(reply, request, 429, 'RATE_LIMITED', 'hunt.rateLimited');
+    }
+
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(request.params.id)) {
+      return sendApiError(reply, request, 404, 'CHARACTER_NOT_FOUND', 'error.characterNotFound');
+    }
+
+    const char = await findCharacterByIdForUser(pool, request.params.id, resolved.session.userId);
+    if (!char) {
+      return sendApiError(reply, request, 404, 'CHARACTER_NOT_FOUND', 'error.characterNotFound');
+    }
+
+    const parsed = SellNpcItemRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return sendApiError(reply, request, 400, 'VALIDATION_ERROR', 'auth.validationError');
+    }
+
+    try {
+      const result = await sellNpcInventoryItem(pool, {
+        characterId: char.id,
+        itemId: parsed.data.itemId,
+        instanceId: parsed.data.instanceId,
+        slotIndex: parsed.data.slotIndex,
+        quantity: parsed.data.quantity,
+        idempotencyKey: parsed.data.idempotencyKey,
+        nowIso: clock.nowIso()
+      });
+
+      return reply.code(200).send(SellNpcItemResponseSchema.parse(result));
+    } catch (err) {
+      if (err instanceof NpcShopError) {
+        const messageKey = mapNpcShopErrorCodeToMessageKey(err.code);
+        return sendApiError(reply, request, err.statusCode, err.code, messageKey);
+      }
+      throw err;
+    }
   });
 
   return app;

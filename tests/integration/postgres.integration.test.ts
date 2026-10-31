@@ -20,7 +20,7 @@ describe('PostgreSQL live database integration', () => {
       expect(healthy).toBe(true);
 
       await pool.query(
-        'DROP TABLE IF EXISTS inventory_movements, inventory_instances, inventory_containers, currency_ledger, hunt_reward_items, hunt_segments, hunts, characters, sessions, users, schema_migrations CASCADE'
+        'DROP TABLE IF EXISTS npc_transaction_lines, npc_transactions, inventory_movements, inventory_instances, inventory_containers, currency_ledger, hunt_reward_items, hunt_segments, hunts, characters, sessions, users, schema_migrations CASCADE'
       );
 
       const migrations = loadMigrationsFromDir();
@@ -30,7 +30,8 @@ describe('PostgreSQL live database integration', () => {
         '0003_persistent_offline_hunts',
         '0004_persistent_inventory_backpack',
         '0005_equipment_paperdoll',
-        '0006_container_slot_bounds'
+        '0006_container_slot_bounds',
+        '0007_npc_shop_economy'
       ]);
 
       // 1. Test incremental upgrade on a database that already has existing characters from 0002
@@ -60,7 +61,8 @@ describe('PostgreSQL live database integration', () => {
         '0003_persistent_offline_hunts',
         '0004_persistent_inventory_backpack',
         '0005_equipment_paperdoll',
-        '0006_container_slot_bounds'
+        '0006_container_slot_bounds',
+        '0007_npc_shop_economy'
       ]);
 
       // Verify existing character received one-time starter potion supplies, backfilled currency_ledger, and 20-slot backpack
@@ -108,7 +110,7 @@ describe('PostgreSQL live database integration', () => {
 
       // 2. Test clean migration from empty database + idempotent re-run
       await pool.query(
-        'DROP TABLE IF EXISTS inventory_movements, inventory_instances, inventory_containers, currency_ledger, hunt_reward_items, hunt_segments, hunts, characters, sessions, users, schema_migrations CASCADE'
+        'DROP TABLE IF EXISTS npc_transaction_lines, npc_transactions, inventory_movements, inventory_instances, inventory_containers, currency_ledger, hunt_reward_items, hunt_segments, hunts, characters, sessions, users, schema_migrations CASCADE'
       );
 
       const firstRun = await applyMigrations(pool, migrations);
@@ -118,7 +120,8 @@ describe('PostgreSQL live database integration', () => {
         '0003_persistent_offline_hunts',
         '0004_persistent_inventory_backpack',
         '0005_equipment_paperdoll',
-        '0006_container_slot_bounds'
+        '0006_container_slot_bounds',
+        '0007_npc_shop_economy'
       ]);
 
       const secondRun = await applyMigrations(pool, migrations);
@@ -127,7 +130,7 @@ describe('PostgreSQL live database integration', () => {
       const ledgerRows = await pool.query<{ version: string; checksum: string }>(
         'SELECT version, checksum FROM schema_migrations ORDER BY version ASC'
       );
-      expect(ledgerRows.rows).toHaveLength(6);
+      expect(ledgerRows.rows).toHaveLength(7);
       expect(ledgerRows.rows[0]?.version).toBe('0001_schema_migrations');
       expect(ledgerRows.rows[0]?.checksum).toBe(migrations[0]?.checksum);
       expect(ledgerRows.rows[1]?.version).toBe('0002_auth_sessions_characters');
@@ -140,6 +143,8 @@ describe('PostgreSQL live database integration', () => {
       expect(ledgerRows.rows[4]?.checksum).toBe(migrations[4]?.checksum);
       expect(ledgerRows.rows[5]?.version).toBe('0006_container_slot_bounds');
       expect(ledgerRows.rows[5]?.checksum).toBe(migrations[5]?.checksum);
+      expect(ledgerRows.rows[6]?.version).toBe('0007_npc_shop_economy');
+      expect(ledgerRows.rows[6]?.checksum).toBe(migrations[6]?.checksum);
 
       const tamperedMigrations = [
         {

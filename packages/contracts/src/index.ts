@@ -705,3 +705,91 @@ export const UnequipItemResponseSchema = z.object({
   idempotentReplay: z.boolean()
 });
 export type UnequipItemResponseDto = z.infer<typeof UnequipItemResponseSchema>;
+
+// --- IDLE-005C: NPC Shop & Economy Schemas ---
+
+export const NpcMerchantDtoSchema = z.object({
+  id: z.string().min(1),
+  nameKey: z.string().min(1),
+  greetingKey: z.string().min(1)
+});
+export type NpcMerchantDto = z.infer<typeof NpcMerchantDtoSchema>;
+
+export const NpcOfferDtoSchema = z.object({
+  offerId: z.string().min(1),
+  operationType: z.enum(['BUY', 'SELL']),
+  productId: z.string().min(1),
+  unitPriceGold: z.number().int().positive(),
+  maxQuantity: z.number().int().positive(),
+  enabled: z.boolean(),
+  catalogVersion: z.number().int().positive()
+});
+export type NpcOfferDto = z.infer<typeof NpcOfferDtoSchema>;
+
+export const NpcShopCatalogResponseSchema = z.object({
+  merchant: NpcMerchantDtoSchema,
+  buyOffers: z.array(NpcOfferDtoSchema),
+  sellOffers: z.array(NpcOfferDtoSchema),
+  catalogVersion: z.number().int().positive()
+});
+export type NpcShopCatalogResponseDto = z.infer<typeof NpcShopCatalogResponseSchema>;
+
+export const BuyNpcProductRequestSchema = z.object({
+  offerId: z.string().min(1).max(128),
+  quantity: z.number().int().min(1).max(1000),
+  idempotencyKey: z.string().min(1).max(128)
+});
+export type BuyNpcProductRequestDto = z.infer<typeof BuyNpcProductRequestSchema>;
+
+export const BuyNpcProductResponseSchema = z.object({
+  characterId: z.string().uuid(),
+  productId: z.enum(['health-potion', 'mana-potion']),
+  quantity: z.number().int().positive(),
+  unitPriceGold: z.number().int().positive(),
+  totalCostGold: z.number().int().positive(),
+  newGoldBalance: z.number().int().min(0),
+  newPotionCount: z.number().int().min(0),
+  idempotentReplay: z.boolean()
+});
+export type BuyNpcProductResponseDto = z.infer<typeof BuyNpcProductResponseSchema>;
+
+export const SellNpcItemRequestSchema = z.object({
+  itemId: z.string().min(1).max(64),
+  instanceId: z.string().uuid().optional(),
+  slotIndex: z.number().int().min(0).max(99).optional(),
+  quantity: z.number().int().min(1).max(1_000_000),
+  idempotencyKey: z.string().min(1).max(128)
+});
+export type SellNpcItemRequestDto = z.infer<typeof SellNpcItemRequestSchema>;
+
+export const SellNpcItemResponseSchema = z.object({
+  characterId: z.string().uuid(),
+  itemId: z.string().min(1),
+  quantitySold: z.number().int().positive(),
+  unitPriceGold: z.number().int().positive(),
+  totalPayoutGold: z.number().int().positive(),
+  newGoldBalance: z.number().int().min(0),
+  inventory: CharacterInventoryResponseSchema,
+  idempotentReplay: z.boolean()
+});
+export type SellNpcItemResponseDto = z.infer<typeof SellNpcItemResponseSchema>;
+
+export const NpcTransactionDtoSchema = z.object({
+  id: z.string().uuid(),
+  characterId: z.string().uuid(),
+  npcId: z.string(),
+  operationType: z.enum(['BUY', 'SELL']),
+  productId: z.string(),
+  quantity: z.number().int().positive(),
+  unitPriceGold: z.number().int().positive(),
+  totalGold: z.number().int().positive(),
+  createdAt: z.string().datetime()
+});
+export type NpcTransactionDto = z.infer<typeof NpcTransactionDtoSchema>;
+
+export const NpcShopHistoryResponseSchema = z.object({
+  characterId: z.string().uuid(),
+  transactions: z.array(NpcTransactionDtoSchema)
+});
+export type NpcShopHistoryResponseDto = z.infer<typeof NpcShopHistoryResponseSchema>;
+
