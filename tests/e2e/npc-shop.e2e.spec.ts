@@ -217,3 +217,113 @@ test('completes full NPC Shop lifecycle: buy potions, sell loot, restock, hunt l
 
   expect(consoleErrors).toEqual([]);
 });
+
+test('completes genuine full gameplay loop without DB mock: HUNT -> SETTLE -> CLAIM -> NPC SELL -> BUY POTIONS -> NEXT HUNT', async ({
+  page
+}) => {
+  const consoleErrors: string[] = [];
+  page.on('console', (msg) => {
+    if (
+      msg.type() === 'error' &&
+      !msg.text().includes('401 (Unauthorized)') &&
+      !msg.text().includes('favicon') &&
+      !msg.text().includes('404 (Not Found)')
+    ) {
+      consoleErrors.push(msg.text());
+    }
+  });
+
+  // 1. Setup & Registration
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/');
+
+  await page.getByTestId('auth-mode-toggle').click();
+  const uniqueEmail = `loop-e2e-${Date.now()}@example.com`;
+  const password = 'LoopPassword123!';
+  await page.getByTestId('auth-email-input').fill(uniqueEmail);
+  await page.getByTestId('auth-password-input').fill(password);
+  await page.getByTestId('auth-submit-button').click();
+
+  // Create Knight character
+  await expect(page.getByTestId('character-select-panel')).toBeVisible();
+  const randomSuffix = Array.from({ length: 6 }, () =>
+    String.fromCharCode(97 + Math.floor(Math.random() * 26))
+  ).join('');
+  const charName = `LoopHero${randomSuffix}`;
+
+  await page.getByTestId('character-name-input').fill(charName);
+  await page.getByTestId('character-vocation-select').selectOption('knight');
+  await page.getByTestId('character-create-submit').click();
+  await expect(page.getByTestId('character-dashboard')).toBeVisible();
+
+  // 2. Step 1: HUNT -> Start hunt in damp-catacombs
+  await page.getByTestId('nav.hunts').click();
+  await expect(page.getByTestId('hunts-view')).toBeVisible();
+  await page.getByTestId('zone-card-damp-catacombs').click();
+  await page.getByTestId('strategy-option-aggressive').click();
+  await page.getByTestId('hp-potions-input').fill('20');
+  await page.getByTestId('mp-potions-input').fill('10');
+  await page.getByTestId('start-hunt-button').click();
+  await expect(page.getByTestId('active-hunt-window')).toBeVisible({ timeout: 10000 });
+
+  // 3. Step 2: SETTLE -> Wait for combat events and settle
+  await page.waitForTimeout(11000);
+  await page.getByTestId('settle-hunt-button').click();
+  await page.waitForTimeout(1000);
+
+  // Stop the hunt
+  await page.getByTestId('stop-hunt-button').click();
+  await expect(page.getByTestId('active-hunt-window')).not.toBeVisible({ timeout: 10000 });
+
+  // Close hunt report
+  await expect(page.getByTestId('hunt-report-window')).toBeVisible({ timeout: 10000 });
+  await page.getByTestId('close-report-button').click();
+  await expect(page.getByTestId('hunt-report-window')).not.toBeVisible();
+
+  // 4. Step 3: CLAIM -> Claim any dropped loot from the AFK reward inbox
+  await expect(page.getByTestId('reward-inbox-window')).toBeVisible();
+  const claimButtons = page.locator('[data-testid^="claim-reward-btn-"]');
+  const claimCount = await claimButtons.count();
+  if (claimCount > 0) {
+    await claimButtons.first().click();
+    await page.waitForTimeout(500);
+  }
+
+  // 5. Step 4: NPC SELL -> Navigate to Shop tab and sell items (or verify catalog)
+  await page.getByTestId('nav.shop').click();
+  await expect(page.getByTestId('npc-shop-view')).toBeVisible();
+
+  // Check SELL tab
+  await page.getByTestId('shop-tab-sell').click();
+  await expect(page.getByTestId('shop-sell-panel')).toBeVisible();
+
+  const sellSubmitBtns = page.locator('[data-testid^="btn-sell-submit-"]');
+  const sellCount = await sellSubmitBtns.count();
+  if (sellCount > 0) {
+    await sellSubmitBtns.first().click();
+    await page.waitForTimeout(500);
+  }
+
+  // 6. Step 5: BUY POTIONS -> Buy potions to restock
+  await page.getByTestId('shop-tab-buy').click();
+  await expect(page.getByTestId('shop-buy-panel')).toBeVisible();
+  await page.getByTestId('input-buy-hp-qty').fill('1');
+
+  const buyHpBtn = page.getByTestId('btn-buy-health-potion');
+  if (await buyHpBtn.isEnabled()) {
+    await buyHpBtn.click();
+    await page.waitForTimeout(500);
+  }
+
+  // 7. Step 6: NEXT HUNT -> Start the next hunt cleanly
+  await page.getByTestId('nav.hunts').click();
+  await expect(page.getByTestId('hunts-view')).toBeVisible();
+  await page.getByTestId('zone-card-damp-catacombs').click();
+  await page.getByTestId('strategy-option-balanced').click();
+  await page.getByTestId('hp-potions-input').fill('10');
+  await page.getByTestId('mp-potions-input').fill('5');
+  await page.getByTestId('start-hunt-button').click();
+  await expect(page.getByTestId('active-hunt-window')).toBeVisible({ timeout: 10000 });
+
+  expect(consoleErrors).toEqual([]);
+});

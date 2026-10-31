@@ -250,6 +250,14 @@ export interface ReconcileCharacterEconomyReport {
   readonly totalMpPotionsPurchased: number;
   readonly totalItemsSoldByCode: Readonly<Record<string, number>>;
   readonly totalCurrentItemsByCode: Readonly<Record<string, number>>;
+  readonly characterHpPotions: number;
+  readonly characterMpPotions: number;
+  readonly totalHpPotionsConsumed: number;
+  readonly totalMpPotionsConsumed: number;
+  readonly unusedReservedHpPotions: number;
+  readonly unusedReservedMpPotions: number;
+  readonly expectedHpPotions: number;
+  readonly expectedMpPotions: number;
   readonly isPotionsReconciled: boolean;
 }
 
@@ -1857,7 +1865,7 @@ export async function reconcileCharacterEconomy(
     totalCurrentItemsByCode[row.item_id] = Number(row.total_qty);
   }
 
-  // Hunt potion consumption
+  // Hunt potion consumption across all committed segments
   let totalHpPotionsConsumed = 0;
   let totalMpPotionsConsumed = 0;
   for (const seg of segmentsRes.rows) {
@@ -1865,22 +1873,44 @@ export async function reconcileCharacterEconomy(
     totalMpPotionsConsumed += Number(seg.rewards.deltaMpPotionsUsed ?? 0);
   }
 
-  // Reserved potions in active/continuation hunts
-  const reservedPotionsRes = await pool.query<{ res_hp: string | number; res_mp: string | number }>(
-    `SELECT COALESCE(SUM(reserved_hp_potions), 0) AS res_hp, COALESCE(SUM(reserved_mp_potions), 0) AS res_mp
+  // Active / continuation hunts: calculate currently unused reserved potions
+  const activeHuntsRes = await pool.query<{
+    id: string;
+    reserved_hp_potions: string | number;
+    reserved_mp_potions: string | number;
+  }>(
+    `SELECT id, reserved_hp_potions, reserved_mp_potions
      FROM hunts
      WHERE character_id = $1 AND status IN ('ACTIVE', 'STOP_CONTINUATION_REQUIRED') AND potions_returned = FALSE`,
     [characterId]
   );
-  const reservedHp = Number(reservedPotionsRes.rows[0]?.res_hp ?? 0);
-  const reservedMp = Number(reservedPotionsRes.rows[0]?.res_mp ?? 0);
+
+  let unusedReservedHp = 0;
+  let unusedReservedMp = 0;
+  for (const hunt of activeHuntsRes.rows) {
+    const segRes = await pool.query<{
+      used_hp: string | number;
+      used_mp: string | number;
+    }>(
+      `SELECT
+         COALESCE(SUM((rewards->>'deltaHpPotionsUsed')::int), 0) AS used_hp,
+         COALESCE(SUM((rewards->>'deltaMpPotionsUsed')::int), 0) AS used_mp
+       FROM hunt_segments
+       WHERE hunt_id = $1`,
+      [hunt.id]
+    );
+    const usedHp = Number(segRes.rows[0]?.used_hp ?? 0);
+    const usedMp = Number(segRes.rows[0]?.used_mp ?? 0);
+    unusedReservedHp += Math.max(0, Number(hunt.reserved_hp_potions) - usedHp);
+    unusedReservedMp += Math.max(0, Number(hunt.reserved_mp_potions) - usedMp);
+  }
 
   const initialHpPotions = 250;
   const initialMpPotions = 150;
   const expectedHpPotions = initialHpPotions + totalHpPotionsPurchased - totalHpPotionsConsumed;
-  const actualHpPotions = Number(charRow.hp_potions) + reservedHp;
+  const actualHpPotions = Number(charRow.hp_potions) + unusedReservedHp;
   const expectedMpPotions = initialMpPotions + totalMpPotionsPurchased - totalMpPotionsConsumed;
-  const actualMpPotions = Number(charRow.mp_potions) + reservedMp;
+  const actualMpPotions = Number(charRow.mp_potions) + unusedReservedMp;
 
   const isPotionsReconciled =
     expectedHpPotions === actualHpPotions && expectedMpPotions === actualMpPotions;
@@ -1941,6 +1971,14 @@ export async function reconcileCharacterEconomy(
     totalMpPotionsPurchased,
     totalItemsSoldByCode,
     totalCurrentItemsByCode,
+    characterHpPotions: Number(charRow.hp_potions),
+    characterMpPotions: Number(charRow.mp_potions),
+    totalHpPotionsConsumed,
+    totalMpPotionsConsumed,
+    unusedReservedHpPotions: unusedReservedHp,
+    unusedReservedMpPotions: unusedReservedMp,
+    expectedHpPotions,
+    expectedMpPotions,
     isPotionsReconciled
   };
 }

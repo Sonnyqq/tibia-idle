@@ -1518,6 +1518,9 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
         return 'error.idempotencyConflict';
       case 'SLOT_INDEX_OUT_OF_BOUNDS':
         return 'error.slotOutOfBounds';
+      case 'INSTANCE_SLOT_MISMATCH':
+      case 'ITEM_TYPE_MISMATCH':
+        return 'error.slotMismatch';
       case 'BACKPACK_NOT_FOUND':
         return 'error.inventoryFull';
       case 'CHARACTER_NOT_FOUND':

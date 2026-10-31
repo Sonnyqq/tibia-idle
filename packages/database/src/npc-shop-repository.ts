@@ -133,11 +133,19 @@ export async function buyNpcProduct(
     );
     const existingTx = existingTxRes.rows[0];
     if (existingTx) {
-      if (
-        existingTx.operation_type !== 'BUY' ||
-        existingTx.product_id !== buyOffer.productId ||
-        Number(existingTx.quantity) !== input.quantity
-      ) {
+      const rawPayload = existingTx.canonical_payload;
+      const payload = (typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload) as Record<string, unknown>;
+
+      const isMatch =
+        existingTx.operation_type === 'BUY' &&
+        payload.operationType === 'BUY' &&
+        payload.npcId === npcId &&
+        payload.offerId === buyOffer.offerId &&
+        payload.productId === buyOffer.productId &&
+        Number(payload.quantity) === input.quantity &&
+        Number(existingTx.quantity) === input.quantity;
+
+      if (!isMatch) {
         throw new NpcShopError(
           'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD',
           `Idempotency key '${input.idempotencyKey}' was already used for a different shop transaction`,
@@ -229,6 +237,7 @@ export async function buyNpcProduct(
     const ledgerId = randomUUID();
     const createdAtIso = input.nowIso ?? new Date().toISOString();
     const canonicalPayload = {
+      operationType: 'BUY',
       characterId: input.characterId,
       npcId,
       offerId: buyOffer.offerId,
@@ -339,11 +348,20 @@ export async function sellNpcInventoryItem(
     );
     const existingTx = existingTxRes.rows[0];
     if (existingTx) {
-      if (
-        existingTx.operation_type !== 'SELL' ||
-        existingTx.product_id !== input.itemId ||
-        Number(existingTx.quantity) !== input.quantity
-      ) {
+      const rawPayload = existingTx.canonical_payload;
+      const payload = (typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload) as Record<string, unknown>;
+
+      const isMatch =
+        existingTx.operation_type === 'SELL' &&
+        payload.operationType === 'SELL' &&
+        payload.npcId === npcId &&
+        payload.itemId === input.itemId &&
+        (payload.instanceId ?? null) === (input.instanceId ?? null) &&
+        (payload.slotIndex ?? null) === (input.slotIndex ?? null) &&
+        Number(payload.quantity) === input.quantity &&
+        Number(existingTx.quantity) === input.quantity;
+
+      if (!isMatch) {
         throw new NpcShopError(
           'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD',
           `Idempotency key '${input.idempotencyKey}' was already used for a different shop transaction`,
@@ -403,11 +421,37 @@ export async function sellNpcInventoryItem(
       }
     }
 
+    if (input.instanceId && input.slotIndex !== undefined) {
+      const checkRes = await client.query<InventoryInstanceDbRow>(
+        `SELECT id, slot_index, item_id FROM inventory_instances
+         WHERE id = $1 AND container_id = $2 FOR UPDATE`,
+        [input.instanceId, backpack.id]
+      );
+      const instanceRow = checkRes.rows[0];
+      if (!instanceRow || instanceRow.slot_index !== input.slotIndex) {
+        throw new NpcShopError(
+          'INSTANCE_SLOT_MISMATCH',
+          `Instance '${input.instanceId}' is not at slot ${input.slotIndex}`,
+          400
+        );
+      }
+      if (instanceRow.item_id !== input.itemId) {
+        throw new NpcShopError(
+          'ITEM_TYPE_MISMATCH',
+          `Instance '${input.instanceId}' item '${instanceRow.item_id}' does not match requested itemId '${input.itemId}'`,
+          400
+        );
+      }
+    }
+
     // 5. Find matching items strictly in backpack (paperdoll excluded)
     let instancesQuery = `SELECT * FROM inventory_instances WHERE character_id = $1 AND container_id = $2 AND item_id = $3`;
     const instancesParams: unknown[] = [input.characterId, backpack.id, input.itemId];
 
-    if (input.instanceId) {
+    if (input.instanceId && input.slotIndex !== undefined) {
+      instancesParams.push(input.instanceId, input.slotIndex);
+      instancesQuery += ` AND id = $${instancesParams.length - 1} AND slot_index = $${instancesParams.length}`;
+    } else if (input.instanceId) {
       instancesParams.push(input.instanceId);
       instancesQuery += ` AND id = $${instancesParams.length}`;
     } else if (input.slotIndex !== undefined) {
@@ -477,11 +521,12 @@ export async function sellNpcInventoryItem(
     const movementId = randomUUID();
     const createdAtIso = input.nowIso ?? new Date().toISOString();
     const canonicalPayload = {
+      operationType: 'SELL',
       characterId: input.characterId,
       npcId,
       itemId: input.itemId,
-      instanceId: input.instanceId,
-      slotIndex: input.slotIndex,
+      instanceId: input.instanceId ?? null,
+      slotIndex: input.slotIndex ?? null,
       quantity: input.quantity,
       unitPriceGold: sellOffer.unitPriceGold,
       totalPayoutGold: totalPayout

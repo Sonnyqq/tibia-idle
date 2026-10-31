@@ -46,8 +46,8 @@ export const DEFAULT_COMBAT_RESOURCES: CombatResourceLoadout = {
   mpPotions: 150,
   hpPotionHealAmount: 95,
   mpPotionRestoreAmount: 55,
-  hpPotionUnitCostGold: 22,
-  mpPotionUnitCostGold: 25
+  hpPotionUnitCostGold: 45,
+  mpPotionUnitCostGold: 50
 } as const;
 
 export const DEFAULT_STRATEGIES_CONFIG: Readonly<

@@ -10,6 +10,7 @@ import {
 } from '@tibia-idle/contracts';
 import {
   applyMigrations,
+  buyNpcProduct,
   createDatabasePool,
   equipInventoryItem,
   getCharacterEquipment,
@@ -17,9 +18,13 @@ import {
   loadMigrationsFromDir,
   reconcileCharacterEconomy,
   resolveTestDatabaseConfig,
-  startHunt
+  sellNpcInventoryItem,
+  settleHunt,
+  startHunt,
+  stopHunt,
+  type StopHuntResult
 } from '@tibia-idle/database';
-import { createFixedClock, DEFAULT_NPC_MERCHANT } from '@tibia-idle/domain';
+import { createFixedClock, DEFAULT_COMBAT_SIMULATION_CONFIG, DEFAULT_NPC_MERCHANT } from '@tibia-idle/domain';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 describe('IDLE-005C — NPC Shop, Potion Restock & Gold Economy Integration Tests', () => {
@@ -71,6 +76,11 @@ describe('IDLE-005C — NPC Shop, Potion Restock & Gold Economy Integration Test
     const sessionCookie = (rawSetCookie ?? '').split(';')[0] ?? '';
     const csrfToken = regJson.csrfToken as string;
 
+    const suffix = Array.from({ length: 4 }, () =>
+      String.fromCharCode(97 + Math.floor(Math.random() * 26))
+    ).join('');
+    const safeName = `${name.replace(/[^A-Za-z ]/g, '').slice(0, 15)} ${suffix}`.trim();
+
     const charRes = await server.inject({
       method: 'POST',
       url: '/characters',
@@ -78,7 +88,7 @@ describe('IDLE-005C — NPC Shop, Potion Restock & Gold Economy Integration Test
         cookie: sessionCookie,
         'x-csrf-token': csrfToken
       },
-      payload: { name, vocation: 'knight' }
+      payload: { name: safeName, vocation: 'knight' }
     });
     expect(charRes.statusCode).toBe(201);
     const char = charRes.json() as CharacterDto;
@@ -653,21 +663,655 @@ describe('IDLE-005C — NPC Shop, Potion Restock & Gold Economy Integration Test
       }
     });
 
-    it('works reliably with pool=1 without connection leaks or deadlocks', async () => {
+    it('executes real buy and sell operations with pool.maxConnections=1 with idempotent retries', async () => {
       const singlePool = createDatabasePool({
         ...dbConfig,
         maxConnections: 1
       });
 
+      const ctx = await createTestAccountAndCharacter('SinglePool Hero', 500);
       try {
-        const charRes = await pool.query<{ id: string }>('SELECT id FROM characters LIMIT 1');
-        const charId = charRes.rows[0]?.id ?? '';
+        const bpRes = await pool.query<{ id: string }>(
+          "SELECT id FROM inventory_containers WHERE character_id = $1 AND container_type = 'backpack'",
+          [ctx.character.id]
+        );
+        const bpId = bpRes.rows[0]?.id ?? '';
 
-        // Perform buy and sell sequentially on pool=1
-        const recon = await reconcileCharacterEconomy(singlePool, charId);
+        await pool.query(
+          `INSERT INTO inventory_instances (id, character_id, container_id, slot_index, item_id, quantity, metadata, row_version)
+           VALUES ($1, $2, $3, 0, 'rat-pelt', 4, '{}'::jsonb, 1)`,
+          [randomUUID(), ctx.character.id, bpId]
+        );
+
+        // Real buy on pool=1
+        const buyKey = randomUUID();
+        const buyResult = await buyNpcProduct(singlePool, {
+          characterId: ctx.character.id,
+          offerId: 'offer-buy-health-potion',
+          quantity: 2,
+          idempotencyKey: buyKey
+        });
+        expect(buyResult.idempotentReplay).toBe(false);
+        expect(buyResult.newGoldBalance).toBe(410); // 500 - 90
+        expect(buyResult.newPotionCount).toBe(252);
+
+        // Idempotent retry on pool=1
+        const buyReplay = await buyNpcProduct(singlePool, {
+          characterId: ctx.character.id,
+          offerId: 'offer-buy-health-potion',
+          quantity: 2,
+          idempotencyKey: buyKey
+        });
+        expect(buyReplay.idempotentReplay).toBe(true);
+        expect(buyReplay.newGoldBalance).toBe(410);
+        expect(buyReplay.newPotionCount).toBe(252);
+
+        // Real sell on pool=1 (4 rat-pelt * 9 = 36 gold)
+        const sellKey = randomUUID();
+        const sellResult = await sellNpcInventoryItem(singlePool, {
+          characterId: ctx.character.id,
+          itemId: 'rat-pelt',
+          quantity: 4,
+          idempotencyKey: sellKey
+        });
+        expect(sellResult.idempotentReplay).toBe(false);
+        expect(sellResult.totalPayoutGold).toBe(36);
+        expect(sellResult.newGoldBalance).toBe(446); // 410 + 36
+
+        // Idempotent retry sell on pool=1
+        const sellReplay = await sellNpcInventoryItem(singlePool, {
+          characterId: ctx.character.id,
+          itemId: 'rat-pelt',
+          quantity: 4,
+          idempotencyKey: sellKey
+        });
+        expect(sellReplay.idempotentReplay).toBe(true);
+        expect(sellReplay.newGoldBalance).toBe(446);
+
+        // Reconcile on pool=1
+        const recon = await reconcileCharacterEconomy(singlePool, ctx.character.id);
+        expect(recon.isGoldReconciled).toBe(true);
+        expect(recon.isPotionsReconciled).toBe(true);
+      } finally {
+        await ctx.server.close();
+        await singlePool.end();
+      }
+    });
+
+    it('enforces serialisation and no double-spend with 20 concurrent buys on finite gold balance', async () => {
+      // 450 gold allows exactly 10x 45 gold potions
+      const ctx = await createTestAccountAndCharacter('Concurrent Buyer', 450);
+      try {
+        const promises = Array.from({ length: 20 }, (_, i) => {
+          return ctx.server.inject({
+            method: 'POST',
+            url: `/characters/${ctx.character.id}/npc-shop/buy`,
+            headers: {
+              cookie: ctx.sessionCookie,
+              'x-csrf-token': ctx.csrfToken
+            },
+            payload: {
+              offerId: 'offer-buy-health-potion',
+              quantity: 1,
+              idempotencyKey: `buy-race-${i}-${randomUUID()}`
+            }
+          });
+        });
+
+        const responses = await Promise.all(promises);
+        const successes = responses.filter((r) => r.statusCode === 200);
+        const failures = responses.filter((r) => r.statusCode === 400);
+
+        expect(successes).toHaveLength(10);
+        expect(failures).toHaveLength(10);
+
+        const charRes = await pool.query<{ gold: string; hp_potions: number }>(
+          'SELECT gold, hp_potions FROM characters WHERE id = $1',
+          [ctx.character.id]
+        );
+        expect(Number(charRes.rows[0]?.gold)).toBe(0);
+        expect(charRes.rows[0]?.hp_potions).toBe(260); // 250 + 10
+
+        const recon = await reconcileCharacterEconomy(pool, ctx.character.id);
+        expect(recon.isGoldReconciled).toBe(true);
+        expect(recon.isPotionsReconciled).toBe(true);
+      } finally {
+        await ctx.server.close();
+      }
+    });
+
+    it('simulates crash before commit and verifies zero balance/potion change and no key persistence', async () => {
+      const ctx = await createTestAccountAndCharacter('Crash Before Commit Hero', 200);
+      try {
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          await client.query('UPDATE characters SET gold = gold - 90 WHERE id = $1', [ctx.character.id]);
+          // Simulated crash/abort before commit
+          await client.query('ROLLBACK');
+        } finally {
+          client.release();
+        }
+
+        const charRes = await pool.query<{ gold: string; hp_potions: number }>(
+          'SELECT gold, hp_potions FROM characters WHERE id = $1',
+          [ctx.character.id]
+        );
+        expect(Number(charRes.rows[0]?.gold)).toBe(200);
+        expect(charRes.rows[0]?.hp_potions).toBe(250);
+
+        const txRes = await pool.query('SELECT count(*) FROM npc_transactions WHERE character_id = $1', [ctx.character.id]);
+        expect(Number(txRes.rows[0]?.count)).toBe(0);
+
+        const recon = await reconcileCharacterEconomy(pool, ctx.character.id);
         expect(recon.isGoldReconciled).toBe(true);
       } finally {
-        await singlePool.end();
+        await ctx.server.close();
+      }
+    });
+
+    it('simulates lost response after commit and verifies replay receives exact response without double-debit', async () => {
+      const ctx = await createTestAccountAndCharacter('Lost Response Hero', 300);
+      try {
+        const idempotencyKey = randomUUID();
+        const first = await buyNpcProduct(pool, {
+          characterId: ctx.character.id,
+          offerId: 'offer-buy-health-potion',
+          quantity: 2,
+          idempotencyKey
+        });
+        expect(first.idempotentReplay).toBe(false);
+        expect(first.newGoldBalance).toBe(210);
+        expect(first.newPotionCount).toBe(252);
+
+        // Network dropped before response reached client; client retries with same idempotency key
+        const retry = await buyNpcProduct(pool, {
+          characterId: ctx.character.id,
+          offerId: 'offer-buy-health-potion',
+          quantity: 2,
+          idempotencyKey
+        });
+        expect(retry.idempotentReplay).toBe(true);
+        expect(retry.newGoldBalance).toBe(210);
+        expect(retry.newPotionCount).toBe(252);
+
+        // Verify only 1 currency ledger row was inserted
+        const ledgerRes = await pool.query(
+          "SELECT count(*) FROM currency_ledger WHERE character_id = $1 AND source_type = 'NPC_PURCHASE'",
+          [ctx.character.id]
+        );
+        expect(Number(ledgerRes.rows[0]?.count)).toBe(1);
+
+        const recon = await reconcileCharacterEconomy(pool, ctx.character.id);
+        expect(recon.isGoldReconciled).toBe(true);
+        expect(recon.isPotionsReconciled).toBe(true);
+      } finally {
+        await ctx.server.close();
+      }
+    });
+  });
+
+  describe('P1 — Idempotency Canonical Payload & Active Hunt Replay', () => {
+    it('verifies buy replay compares full canonical payload and rejects modified parameters', async () => {
+      const ctx = await createTestAccountAndCharacter('Payload Buy Hero', 500);
+      try {
+        const key = randomUUID();
+        const firstRes = await ctx.server.inject({
+          method: 'POST',
+          url: `/characters/${ctx.character.id}/npc-shop/buy`,
+          headers: {
+            cookie: ctx.sessionCookie,
+            'x-csrf-token': ctx.csrfToken
+          },
+          payload: {
+            offerId: 'offer-buy-health-potion',
+            quantity: 2,
+            idempotencyKey: key
+          }
+        });
+        expect(firstRes.statusCode).toBe(200);
+        const firstBody = firstRes.json() as BuyNpcProductResponseDto;
+        expect(firstBody.idempotentReplay).toBe(false);
+
+        // Exact same replay -> 200 idempotentReplay=true
+        const replayRes = await ctx.server.inject({
+          method: 'POST',
+          url: `/characters/${ctx.character.id}/npc-shop/buy`,
+          headers: {
+            cookie: ctx.sessionCookie,
+            'x-csrf-token': ctx.csrfToken
+          },
+          payload: {
+            offerId: 'offer-buy-health-potion',
+            quantity: 2,
+            idempotencyKey: key
+          }
+        });
+        expect(replayRes.statusCode).toBe(200);
+        const replayBody = replayRes.json() as BuyNpcProductResponseDto;
+        expect(replayBody.idempotentReplay).toBe(true);
+        expect(replayBody.newGoldBalance).toBe(firstBody.newGoldBalance);
+
+        // Changed quantity -> 409 conflict
+        const qtyConflict = await ctx.server.inject({
+          method: 'POST',
+          url: `/characters/${ctx.character.id}/npc-shop/buy`,
+          headers: {
+            cookie: ctx.sessionCookie,
+            'x-csrf-token': ctx.csrfToken
+          },
+          payload: {
+            offerId: 'offer-buy-health-potion',
+            quantity: 3,
+            idempotencyKey: key
+          }
+        });
+        expect(qtyConflict.statusCode).toBe(409);
+        expect(qtyConflict.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD');
+
+        // Changed offerId -> 409 conflict
+        const offerConflict = await ctx.server.inject({
+          method: 'POST',
+          url: `/characters/${ctx.character.id}/npc-shop/buy`,
+          headers: {
+            cookie: ctx.sessionCookie,
+            'x-csrf-token': ctx.csrfToken
+          },
+          payload: {
+            offerId: 'offer-buy-mana-potion',
+            quantity: 2,
+            idempotencyKey: key
+          }
+        });
+        expect(offerConflict.statusCode).toBe(409);
+        expect(offerConflict.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD');
+      } finally {
+        await ctx.server.close();
+      }
+    });
+
+    it('verifies sell replay compares full canonical payload and validates instanceId vs slotIndex', async () => {
+      const ctx = await createTestAccountAndCharacter('Payload Sell Hero', 100);
+      try {
+        const bpRes = await pool.query<{ id: string }>(
+          "SELECT id FROM inventory_containers WHERE character_id = $1 AND container_type = 'backpack'",
+          [ctx.character.id]
+        );
+        const bpId = bpRes.rows[0]?.id ?? '';
+
+        const instId0 = randomUUID();
+        const instId1 = randomUUID();
+        await pool.query(
+          `INSERT INTO inventory_instances (id, character_id, container_id, slot_index, item_id, quantity, metadata, row_version)
+           VALUES
+             ($1, $2, $3, 0, 'rat-pelt', 5, '{}'::jsonb, 1),
+             ($4, $2, $3, 1, 'copper-coin', 10, '{}'::jsonb, 1)`,
+          [instId0, ctx.character.id, bpId, instId1]
+        );
+
+        // 1. Sell with matching instanceId and slotIndex
+        const sellKey = randomUUID();
+        const matchRes = await ctx.server.inject({
+          method: 'POST',
+          url: `/characters/${ctx.character.id}/npc-shop/sell`,
+          headers: {
+            cookie: ctx.sessionCookie,
+            'x-csrf-token': ctx.csrfToken
+          },
+          payload: {
+            itemId: 'rat-pelt',
+            instanceId: instId0,
+            slotIndex: 0,
+            quantity: 2,
+            idempotencyKey: sellKey
+          }
+        });
+        expect(matchRes.statusCode).toBe(200);
+        const matchBody = matchRes.json() as SellNpcItemResponseDto;
+        expect(matchBody.idempotentReplay).toBe(false);
+
+        // 2. Exact same replay -> 200 idempotentReplay=true
+        const replayRes = await ctx.server.inject({
+          method: 'POST',
+          url: `/characters/${ctx.character.id}/npc-shop/sell`,
+          headers: {
+            cookie: ctx.sessionCookie,
+            'x-csrf-token': ctx.csrfToken
+          },
+          payload: {
+            itemId: 'rat-pelt',
+            instanceId: instId0,
+            slotIndex: 0,
+            quantity: 2,
+            idempotencyKey: sellKey
+          }
+        });
+        expect(replayRes.statusCode).toBe(200);
+        expect((replayRes.json() as SellNpcItemResponseDto).idempotentReplay).toBe(true);
+
+        // 3. Changed quantity -> 409 conflict
+        const qtyConflict = await ctx.server.inject({
+          method: 'POST',
+          url: `/characters/${ctx.character.id}/npc-shop/sell`,
+          headers: {
+            cookie: ctx.sessionCookie,
+            'x-csrf-token': ctx.csrfToken
+          },
+          payload: {
+            itemId: 'rat-pelt',
+            instanceId: instId0,
+            slotIndex: 0,
+            quantity: 3,
+            idempotencyKey: sellKey
+          }
+        });
+        expect(qtyConflict.statusCode).toBe(409);
+        expect(qtyConflict.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD');
+
+        // 4. Mismatched slotIndex for given instanceId -> 400 INSTANCE_SLOT_MISMATCH
+        const mismatchSlotRes = await ctx.server.inject({
+          method: 'POST',
+          url: `/characters/${ctx.character.id}/npc-shop/sell`,
+          headers: {
+            cookie: ctx.sessionCookie,
+            'x-csrf-token': ctx.csrfToken
+          },
+          payload: {
+            itemId: 'copper-coin',
+            instanceId: instId1,
+            slotIndex: 5, // instId1 is at slot 1, not 5!
+            quantity: 1,
+            idempotencyKey: randomUUID()
+          }
+        });
+        expect(mismatchSlotRes.statusCode).toBe(400);
+        expect(mismatchSlotRes.json().error.code).toBe('INSTANCE_SLOT_MISMATCH');
+
+        // 5. Mismatched item type for given instanceId -> 400 ITEM_TYPE_MISMATCH
+        const mismatchTypeRes = await ctx.server.inject({
+          method: 'POST',
+          url: `/characters/${ctx.character.id}/npc-shop/sell`,
+          headers: {
+            cookie: ctx.sessionCookie,
+            'x-csrf-token': ctx.csrfToken
+          },
+          payload: {
+            itemId: 'rat-pelt', // instId1 is copper-coin, not rat-pelt!
+            instanceId: instId1,
+            slotIndex: 1,
+            quantity: 1,
+            idempotencyKey: randomUUID()
+          }
+        });
+        expect(mismatchTypeRes.statusCode).toBe(400);
+        expect(mismatchTypeRes.json().error.code).toBe('ITEM_TYPE_MISMATCH');
+      } finally {
+        await ctx.server.close();
+      }
+    });
+
+    it('allows idempotent replay during active hunt but blocks fresh transactions', async () => {
+      const ctx = await createTestAccountAndCharacter('Hunt Replay Hero', 500);
+      try {
+        const buyKey = randomUUID();
+        const initialBuy = await ctx.server.inject({
+          method: 'POST',
+          url: `/characters/${ctx.character.id}/npc-shop/buy`,
+          headers: {
+            cookie: ctx.sessionCookie,
+            'x-csrf-token': ctx.csrfToken
+          },
+          payload: {
+            offerId: 'offer-buy-health-potion',
+            quantity: 2,
+            idempotencyKey: buyKey
+          }
+        });
+        expect(initialBuy.statusCode).toBe(200);
+
+        // Start active hunt
+        const startRes = await startHunt(pool, {
+          characterId: ctx.character.id,
+          userId: ctx.user.id,
+          zoneId: 'damp-catacombs',
+          strategy: 'balanced',
+          idempotencyKey: randomUUID(),
+          requestedHpPotions: 10,
+          requestedMpPotions: 5
+        });
+        expect(startRes.ok).toBe(true);
+
+        // Replaying prior buy with same key during active hunt succeeds (idempotentReplay = true)
+        const replayRes = await ctx.server.inject({
+          method: 'POST',
+          url: `/characters/${ctx.character.id}/npc-shop/buy`,
+          headers: {
+            cookie: ctx.sessionCookie,
+            'x-csrf-token': ctx.csrfToken
+          },
+          payload: {
+            offerId: 'offer-buy-health-potion',
+            quantity: 2,
+            idempotencyKey: buyKey
+          }
+        });
+        expect(replayRes.statusCode).toBe(200);
+        expect(replayRes.json().idempotentReplay).toBe(true);
+
+        // Fresh buy during active hunt is locked (409 ACTIVE_HUNT_LOCKED)
+        const freshBuy = await ctx.server.inject({
+          method: 'POST',
+          url: `/characters/${ctx.character.id}/npc-shop/buy`,
+          headers: {
+            cookie: ctx.sessionCookie,
+            'x-csrf-token': ctx.csrfToken
+          },
+          payload: {
+            offerId: 'offer-buy-health-potion',
+            quantity: 1,
+            idempotencyKey: randomUUID()
+          }
+        });
+        expect(freshBuy.statusCode).toBe(409);
+        expect(freshBuy.json().error.code).toBe('ACTIVE_HUNT_LOCKED');
+      } finally {
+        await ctx.server.close();
+      }
+    });
+  });
+
+  describe('P1 — Potion Reconciliation Comprehensive Test Suite', () => {
+    it('maintains strict potion reconciliation across hunt lifecycle: start, partial settlement, consumption, stop continuation, completion, and restock', async () => {
+      const clock = createFixedClock(1_700_000_000_000);
+      const ctx = await createTestAccountAndCharacter('Recon Potion Master', 1000);
+      try {
+        // State 1: Fresh character with starting supplies (250 HP, 150 MP)
+        const recon1 = await reconcileCharacterEconomy(pool, ctx.character.id);
+        expect(recon1.isPotionsReconciled).toBe(true);
+        expect(recon1.characterHpPotions).toBe(250);
+        expect(recon1.characterMpPotions).toBe(150);
+        expect(recon1.unusedReservedHpPotions).toBe(0);
+        expect(recon1.unusedReservedMpPotions).toBe(0);
+
+        // State 2: Hunt started with 20 HP and 10 MP potions reserved
+        const startRes = await startHunt(pool, {
+          characterId: ctx.character.id,
+          userId: ctx.user.id,
+          zoneId: 'damp-catacombs',
+          strategy: 'balanced',
+          idempotencyKey: 'recon-hunt-1',
+          requestedHpPotions: 20,
+          requestedMpPotions: 10,
+          clock
+        });
+        expect(startRes.ok).toBe(true);
+        if (!startRes.ok) return;
+
+        const recon2 = await reconcileCharacterEconomy(pool, ctx.character.id);
+        expect(recon2.isPotionsReconciled).toBe(true);
+        expect(recon2.characterHpPotions).toBe(230);
+        expect(recon2.characterMpPotions).toBe(140);
+        expect(recon2.unusedReservedHpPotions).toBe(20);
+        expect(recon2.unusedReservedMpPotions).toBe(10);
+        expect(recon2.totalHpPotionsConsumed).toBe(0);
+        expect(recon2.totalMpPotionsConsumed).toBe(0);
+
+        // State 3: Partial settlement with potions consumed
+        clock.advanceMs(10 * 60 * 1000); // 10 minutes
+        const settleRes = await settleHunt(pool, {
+          huntId: startRes.hunt.huntId,
+          segmentKey: 'seg-recon-1',
+          clock
+        });
+        expect(settleRes.ok).toBe(true);
+        if (!settleRes.ok) return;
+
+        const recon3 = await reconcileCharacterEconomy(pool, ctx.character.id);
+        expect(recon3.isPotionsReconciled).toBe(true);
+        expect(recon3.characterHpPotions).toBe(230);
+        expect(recon3.totalHpPotionsConsumed).toBe(settleRes.rewards.deltaHpPotionsUsed);
+        expect(recon3.totalMpPotionsConsumed).toBe(settleRes.rewards.deltaMpPotionsUsed);
+        expect(recon3.unusedReservedHpPotions).toBe(20 - settleRes.rewards.deltaHpPotionsUsed);
+        expect(recon3.unusedReservedMpPotions).toBe(10 - settleRes.rewards.deltaMpPotionsUsed);
+
+        // State 4: Stop hunt and return unused potions
+        clock.advanceMs(5 * 60 * 1000);
+        const stopRes = await stopHunt(pool, {
+          huntId: startRes.hunt.huntId,
+          stopIdempotencyKey: randomUUID(),
+          clock
+        });
+        expect(stopRes.ok).toBe(true);
+        if (!stopRes.ok) return;
+
+        const recon4 = await reconcileCharacterEconomy(pool, ctx.character.id);
+        expect(recon4.isPotionsReconciled).toBe(true);
+        expect(recon4.unusedReservedHpPotions).toBe(0);
+        expect(recon4.unusedReservedMpPotions).toBe(0);
+        expect(recon4.characterHpPotions).toBe(250 - recon4.totalHpPotionsConsumed);
+        expect(recon4.characterMpPotions).toBe(150 - recon4.totalMpPotionsConsumed);
+
+        // State 5: Purchase potions at NPC shop between hunts
+        const buyHp = await buyNpcProduct(pool, {
+          characterId: ctx.character.id,
+          offerId: 'offer-buy-health-potion',
+          quantity: 15,
+          idempotencyKey: randomUUID()
+        });
+        expect(buyHp.newPotionCount).toBe(recon4.characterHpPotions + 15);
+
+        const buyMp = await buyNpcProduct(pool, {
+          characterId: ctx.character.id,
+          offerId: 'offer-buy-mana-potion',
+          quantity: 8,
+          idempotencyKey: randomUUID()
+        });
+        expect(buyMp.newPotionCount).toBe(recon4.characterMpPotions + 8);
+
+        const recon5 = await reconcileCharacterEconomy(pool, ctx.character.id);
+        expect(recon5.isPotionsReconciled).toBe(true);
+        expect(recon5.totalHpPotionsPurchased).toBe(15);
+        expect(recon5.totalMpPotionsPurchased).toBe(8);
+
+        // State 6: Second consecutive hunt
+        const startRes2 = await startHunt(pool, {
+          characterId: ctx.character.id,
+          userId: ctx.user.id,
+          zoneId: 'damp-catacombs',
+          strategy: 'safe',
+          idempotencyKey: 'recon-hunt-2',
+          requestedHpPotions: 25,
+          requestedMpPotions: 15,
+          clock
+        });
+        expect(startRes2.ok).toBe(true);
+        if (!startRes2.ok) return;
+
+        clock.advanceMs(15 * 60 * 1000);
+        const stopRes2 = await stopHunt(pool, {
+          huntId: startRes2.hunt.huntId,
+          stopIdempotencyKey: randomUUID(),
+          clock
+        });
+        expect(stopRes2.ok).toBe(true);
+
+        const recon6 = await reconcileCharacterEconomy(pool, ctx.character.id);
+        expect(recon6.isPotionsReconciled).toBe(true);
+        expect(recon6.isGoldReconciled).toBe(true);
+        expect(recon6.unusedReservedHpPotions).toBe(0);
+        expect(recon6.unusedReservedMpPotions).toBe(0);
+      } finally {
+        await ctx.server.close();
+      }
+    });
+
+    it('reconciles potions accurately under STOP_CONTINUATION_REQUIRED and simulated mid-drain recovery', async () => {
+      const clock = createFixedClock(1_700_000_000_000);
+      const ctx = await createTestAccountAndCharacter('Continuation Hero', 500);
+      try {
+        const lowBudgetConfig = {
+          ...DEFAULT_COMBAT_SIMULATION_CONFIG,
+          maxEventsPerCall: 200
+        };
+
+        const startRes = await startHunt(pool, {
+          characterId: ctx.character.id,
+          userId: ctx.user.id,
+          zoneId: 'damp-catacombs',
+          strategy: 'safe',
+          idempotencyKey: 'continuation-hunt-start',
+          requestedHpPotions: 50,
+          requestedMpPotions: 20,
+          clock,
+          config: lowBudgetConfig
+        });
+        expect(startRes.ok).toBe(true);
+        if (!startRes.ok) return;
+
+        // Advance 2 hours so that multiple segments are needed
+        clock.advanceMs(2 * 60 * 60 * 1000);
+
+        // Call stopHunt with maxDrainSegments = 1 to force STOP_CONTINUATION_REQUIRED
+        const stopRes = await stopHunt(pool, {
+          huntId: startRes.hunt.huntId,
+          stopIdempotencyKey: 'stop-step-1',
+          maxDrainSegments: 1,
+          clock,
+          config: lowBudgetConfig
+        });
+        expect(stopRes.ok).toBe(true);
+        if (!stopRes.ok) return;
+        expect(stopRes.status).toBe('STOP_CONTINUATION_REQUIRED');
+        expect(stopRes.continuationRequired).toBe(true);
+
+        // Verify economy reconciles cleanly in STOP_CONTINUATION_REQUIRED state!
+        const reconMidDrain = await reconcileCharacterEconomy(pool, ctx.character.id);
+        expect(reconMidDrain.isPotionsReconciled).toBe(true);
+        expect(reconMidDrain.isGoldReconciled).toBe(true);
+
+        // Finish draining the remaining segments
+        let finalStop: StopHuntResult = stopRes;
+        while (finalStop.ok && finalStop.continuationRequired) {
+          finalStop = await stopHunt(pool, {
+            huntId: startRes.hunt.huntId,
+            stopIdempotencyKey: 'stop-step-1',
+            maxDrainSegments: 50,
+            clock,
+            config: lowBudgetConfig
+          });
+        }
+        expect(finalStop.ok).toBe(true);
+        if (!finalStop.ok) return;
+        expect(finalStop.status).toBe('COMPLETED');
+
+        // Verify economy reconciles cleanly after completion!
+        const reconCompleted = await reconcileCharacterEconomy(pool, ctx.character.id);
+        expect(reconCompleted.isPotionsReconciled).toBe(true);
+        expect(reconCompleted.isGoldReconciled).toBe(true);
+        expect(reconCompleted.unusedReservedHpPotions).toBe(0);
+        expect(reconCompleted.unusedReservedMpPotions).toBe(0);
+      } finally {
+        await ctx.server.close();
       }
     });
   });
