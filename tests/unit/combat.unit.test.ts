@@ -1,5 +1,6 @@
 import {
   analyzeZoneEfficiency,
+  areHuntSnapshotsStructurallyEqual,
   assertCatalogAlignmentWithCombatConfig,
   assertNoRngLeakInPublicPayload,
   type CombatCharacterSnapshot,
@@ -14,9 +15,12 @@ import {
   DEFAULT_COMBAT_SIMULATION_CONFIG,
   deserializeCombatCheckpoint,
   generateCryptographicHuntSeed,
+  HUNT_STOP_REASONS,
   HUNT_STRATEGIES,
+  isSupportedSimulationVersion,
   MAX_OFFLINE_DURATION_MS,
   MAX_POTION_STACK_COUNT,
+  reconstructSimulationConfigFromSnapshot,
   resolveKnightAttack,
   resolveMonsterAttack,
   rollMonsterKillLoot,
@@ -910,5 +914,49 @@ describe('IDLE-004A — Deterministic Idle Combat Engine (Unit, Golden, Replay, 
       expect(loot.goldGained).toBeGreaterThanOrEqual(sampleMonster.goldMin);
       expect(loot.goldGained).toBeLessThanOrEqual(sampleMonster.goldMax);
     }
+  });
+
+  it('reconstructs frozen 1.x balance snapshots across config rollovers, validates full structural equality beyond FNV, and supports MANUAL_STOP', () => {
+    expect(isSupportedSimulationVersion('1.0.0')).toBe(true);
+    expect(isSupportedSimulationVersion('1.1.0')).toBe(true);
+    expect(isSupportedSimulationVersion('1.2.3-balance.1')).toBe(true);
+    expect(isSupportedSimulationVersion('2.0.0')).toBe(false);
+    expect(isSupportedSimulationVersion('9.9.9')).toBe(false);
+    expect(HUNT_STOP_REASONS).toContain('MANUAL_STOP');
+
+    const knight = createKnightCombatSnapshot({ level: 10, melee: 30, shielding: 30 });
+    const cpA = createInitialCombatCheckpoint({
+      character: knight,
+      zoneId: 'damp-catacombs',
+      strategy: 'balanced',
+      seed: 12345
+    });
+
+    const reconstructed = reconstructSimulationConfigFromSnapshot(cpA.snapshot, {
+      maxEventsPerCall: 250
+    });
+    expect(reconstructed.version).toBe('1.0.0');
+    expect(reconstructed.maxEventsPerCall).toBe(250);
+    expect(areHuntSnapshotsStructurallyEqual(cpA.snapshot, cpA.snapshot)).toBe(true);
+
+    const alteredSnapshot = {
+      ...cpA.snapshot,
+      character: {
+        ...cpA.snapshot.character,
+        melee: cpA.snapshot.character.melee + 1
+      }
+    };
+    expect(areHuntSnapshotsStructurallyEqual(cpA.snapshot, alteredSnapshot)).toBe(false);
+
+    // Checkpoint terminated with MANUAL_STOP passes validation and serialization round-trip
+    const manualStoppedCp: CombatCheckpointState = {
+      ...cpA,
+      terminated: true,
+      stopReason: 'MANUAL_STOP'
+    };
+    const serialized = serializeCombatCheckpoint(manualStoppedCp);
+    const deserialized = deserializeCombatCheckpoint(serialized);
+    expect(deserialized.terminated).toBe(true);
+    expect(deserialized.stopReason).toBe('MANUAL_STOP');
   });
 });

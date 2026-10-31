@@ -1,12 +1,14 @@
 import {
+  areHuntSnapshotsStructurallyEqual,
   computeHuntSnapshotDigest,
-   deepFreeze,
+  deepFreeze,
   DEFAULT_COMBAT_RESOURCES,
   DEFAULT_COMBAT_SIMULATION_CONFIG,
   DEFAULT_KNIGHT_EQUIPMENT,
   MAX_CHARACTER_LEVEL,
   MAX_CHARACTER_STAT,
   MAX_CHARACTER_VITAL,
+  reconstructSimulationConfigFromSnapshot,
   validateCombatConfig,
   validateCombatResources
 } from './config.js';
@@ -186,6 +188,7 @@ export function validateCombatCheckpoint(checkpoint: CombatCheckpointState): voi
   const snap = checkpoint.snapshot;
   validateCharacterSnapshot(snap.character);
   validateCombatResources(snap.resources);
+  reconstructSimulationConfigFromSnapshot(snap);
 
   const expectedDigest = computeHuntSnapshotDigest(snap);
   if (
@@ -373,7 +376,10 @@ export function simulateHuntSegment(
     resources: resourcesConfig,
     config
   });
-  if (candidateSnapshot.configDigest !== prev.configDigest) {
+  if (
+    candidateSnapshot.configDigest !== prev.configDigest ||
+    !areHuntSnapshotsStructurallyEqual(candidateSnapshot, prev.snapshot)
+  ) {
     throw new RangeError(
       'Hunt configuration mismatch: mid-hunt modification of character, equipment, resources, strategy, or combat balance is forbidden; start a new hunt instead'
     );

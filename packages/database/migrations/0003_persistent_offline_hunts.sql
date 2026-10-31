@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS hunts (
   ),
   started_at TIMESTAMPTZ NOT NULL,
   settled_until TIMESTAMPTZ NOT NULL,
+  stop_requested_at TIMESTAMPTZ NULL,
   completed_at TIMESTAMPTZ NULL,
   simulation_version TEXT NOT NULL CHECK (char_length(simulation_version) BETWEEN 1 AND 32),
   config_digest TEXT NOT NULL CHECK (char_length(config_digest) BETWEEN 1 AND 64),
@@ -52,12 +53,16 @@ CREATE TABLE IF NOT EXISTS hunts (
   potions_returned BOOLEAN NOT NULL DEFAULT FALSE,
   row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   CONSTRAINT chk_hunts_settled_timeline CHECK (settled_until >= started_at),
+  CONSTRAINT chk_hunts_stop_cutoff CHECK (stop_requested_at IS NULL OR stop_requested_at >= started_at),
   CONSTRAINT chk_hunts_status_lifecycle CHECK (
     (status = 'ACTIVE' AND completed_at IS NULL AND potions_returned = FALSE) OR
     (status = 'COMPLETED' AND completed_at IS NOT NULL AND potions_returned = TRUE)
   ),
   CONSTRAINT uq_hunts_character_start_idempotency UNIQUE (character_id, start_idempotency_key)
 );
+
+ALTER TABLE hunts
+  ADD COLUMN IF NOT EXISTS stop_requested_at TIMESTAMPTZ NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_hunts_one_active_per_character
   ON hunts(character_id)

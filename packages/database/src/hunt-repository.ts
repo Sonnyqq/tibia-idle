@@ -19,9 +19,11 @@ import {
   HUNT_STRATEGIES,
   type HuntStopReason,
   type HuntStrategy,
+  isSupportedSimulationVersion,
   MAX_POTION_STACK_COUNT,
   MAX_SAFE_ECONOMY_INT,
   type PublicHuntCheckpointView,
+  reconstructSimulationConfigFromSnapshot,
   resolveLevelFromTotalXp,
   serializeCombatCheckpoint,
   simulateHuntSegment,
@@ -32,7 +34,8 @@ import {
 import type pg from 'pg';
 
 export type HuntStatus = 'ACTIVE' | 'COMPLETED';
-export type PersistedHuntStopReason = HuntStopReason | 'MANUAL_STOP';
+export type PersistedHuntStopReason = HuntStopReason;
+export const DEFAULT_MAX_STOP_DRAIN_SEGMENTS = 24 as const;
 
 export interface ExtendedCharacterDto extends CharacterDto {
   readonly hpPotions: number;
@@ -49,6 +52,7 @@ export interface PublicHuntSessionView {
   readonly stopReason: PersistedHuntStopReason | null;
   readonly startedAtIso: string;
   readonly settledUntilIso: string;
+  readonly stopRequestedAtIso: string | null;
   readonly completedAtIso: string | null;
   readonly simulationVersion: string;
   readonly configDigest: string;
@@ -171,20 +175,31 @@ export type SettleHuntResult =
         | 'ECONOMY_OVERFLOW';
     };
 
+export interface StopHuntFaultInjectionHook {
+  readonly failAfterDrainSegments?: number | undefined;
+}
+
 export interface StopHuntInput {
   readonly huntId: string;
   readonly characterId?: string | undefined;
   readonly userId?: string | undefined;
   readonly stopIdempotencyKey: string;
   readonly settleBeforeStop?: boolean | undefined;
+  readonly maxDrainSegments?: number | undefined;
   readonly clock?: Clock | undefined;
   readonly config?: CombatSimulationConfig | undefined;
+  readonly faultInjection?: StopHuntFaultInjectionHook | undefined;
 }
 
 export type StopHuntResult =
   | {
       readonly ok: true;
+      readonly status: 'COMPLETED' | 'ALREADY_COMPLETED' | 'STOP_CONTINUATION_REQUIRED';
       readonly alreadyCompleted: boolean;
+      readonly continuationRequired: boolean;
+      readonly unprocessedDurationMs: number;
+      readonly segmentsSettled: number;
+      readonly stopCutoffIso: string;
       readonly hunt: PublicHuntSessionView;
       readonly character: ExtendedCharacterDto;
       readonly unusedHpPotionsReturned: number;
@@ -250,6 +265,7 @@ interface HuntDbRow {
   stop_reason: PersistedHuntStopReason | null;
   started_at: Date;
   settled_until: Date;
+  stop_requested_at: Date | null;
   completed_at: Date | null;
   simulation_version: string;
   config_digest: string;
@@ -358,6 +374,7 @@ function mapPublicHuntView(
     stopReason: row.stop_reason,
     startedAtIso: row.started_at.toISOString(),
     settledUntilIso: row.settled_until.toISOString(),
+    stopRequestedAtIso: row.stop_requested_at ? row.stop_requested_at.toISOString() : null,
     completedAtIso: row.completed_at ? row.completed_at.toISOString() : null,
     simulationVersion: row.simulation_version,
     configDigest: row.config_digest,
@@ -654,6 +671,9 @@ export async function settleHunt(
   } catch {
     return { ok: false, reason: 'CONFIG_MISMATCH' };
   }
+  if (!isSupportedSimulationVersion(effectiveConfig.version)) {
+    return { ok: false, reason: 'CONFIG_MISMATCH' };
+  }
 
   while (retries <= MAX_SETTLEMENT_RETRIES) {
     // Phase 1: Read current hunt & character state without holding transaction locks
@@ -674,6 +694,9 @@ export async function settleHunt(
       (input.userId !== undefined && snapshotHuntRow.owner_user_id !== input.userId)
     ) {
       return { ok: false, reason: 'FORBIDDEN_HUNT' };
+    }
+    if (!isSupportedSimulationVersion(snapshotHuntRow.simulation_version)) {
+      return { ok: false, reason: 'CONFIG_MISMATCH' };
     }
 
     // Fast path: check if this exact segmentKey was already committed
@@ -761,10 +784,26 @@ export async function settleHunt(
       };
     }
 
-    // Phase 2: Out-of-transaction deterministic combat simulation
-    const nowMs = clock.nowMs();
+    // Reconstruct the hunt's frozen balance configuration from its immutable snapshot
+    // so older hunts preserve their original balance rules across config rollovers
+    // while applying only the runtime `maxEventsPerCall` execution budget.
+    let huntFrozenConfig: CombatSimulationConfig;
+    try {
+      huntFrozenConfig = reconstructSimulationConfigFromSnapshot(prevCheckpoint.snapshot, {
+        maxEventsPerCall: effectiveConfig.maxEventsPerCall
+      });
+    } catch {
+      return { ok: false, reason: 'CONFIG_MISMATCH' };
+    }
+
+    // Phase 2: Out-of-transaction deterministic combat simulation (clamped to stop_requested_at if stopping)
+    const rawNowMs = clock.nowMs();
+    const effectiveNowMs =
+      snapshotHuntRow.stop_requested_at !== null
+        ? Math.min(rawNowMs, snapshotHuntRow.stop_requested_at.getTime())
+        : rawNowMs;
     const settledUntilMs = snapshotHuntRow.settled_until.getTime();
-    const availableDurationMs = Math.max(0, nowMs - settledUntilMs);
+    const availableDurationMs = Math.max(0, effectiveNowMs - settledUntilMs);
 
     const tSim0 = performance.now();
     let simResult;
@@ -774,7 +813,7 @@ export async function settleHunt(
         checkpoint: prevCheckpoint,
         durationMs: availableDurationMs,
         resourcesConfig: prevCheckpoint.snapshot.resources,
-        config: effectiveConfig
+        config: huntFrozenConfig
       });
     } catch {
       return { ok: false, reason: 'CONFIG_MISMATCH' };
@@ -876,13 +915,29 @@ export async function settleHunt(
         };
       }
 
+      // If a concurrent stopHunt latched stop_requested_at while we simulated past it, retry with the stop cutoff
+      if (
+        lockedHunt.stop_requested_at !== null &&
+        lockedHunt.settled_until.getTime() + simResult.deltaElapsedMs >
+          lockedHunt.stop_requested_at.getTime()
+      ) {
+        retries += 1;
+        await client.query('ROLLBACK');
+        transactionMs += performance.now() - tTx0;
+        continue;
+      }
+
       // Optimistic concurrency check: if another settlement advanced row_version,
       // check if any unsettled time remains; if 0ms remains, settle 0ms immediately, else retry outside lock.
       if (Number(lockedHunt.row_version) !== Number(snapshotHuntRow.row_version)) {
         retries += 1;
+        const lockedTargetNowMs =
+          lockedHunt.stop_requested_at !== null
+            ? Math.min(clock.nowMs(), lockedHunt.stop_requested_at.getTime())
+            : clock.nowMs();
         const remainingAfterConcurrentMs = Math.max(
           0,
-          clock.nowMs() - lockedHunt.settled_until.getTime()
+          lockedTargetNowMs - lockedHunt.settled_until.getTime()
         );
         if (remainingAfterConcurrentMs > 0) {
           await client.query('ROLLBACK');
@@ -894,12 +949,16 @@ export async function settleHunt(
           lockedHunt.simulation_version,
           lockedHunt.config_digest
         );
+        const concurrentFrozenConfig = reconstructSimulationConfigFromSnapshot(
+          concurrentCp.snapshot,
+          { maxEventsPerCall: effectiveConfig.maxEventsPerCall }
+        );
         simResult = simulateHuntSegment({
           character: concurrentCp.snapshot.character,
           checkpoint: concurrentCp,
           durationMs: 0,
           resourcesConfig: concurrentCp.snapshot.resources,
-          config: effectiveConfig
+          config: concurrentFrozenConfig
         });
       }
 
@@ -1184,7 +1243,10 @@ export async function settleHunt(
 
 /**
  * Stops an active hunt transactionally and returns any unused reserved potions exactly once.
- * Optionally settles elapsed time up to `clock.nowMs()` before stopping.
+ * Establishes a single server-authoritative stop cutoff (`hunts.stop_requested_at`),
+ * drains unsettled offline time in a bounded loop (`maxDrainSegments`), and NEVER finalizes
+ * the hunt or returns potions while unsettled time up to the cutoff remains
+ * (`STOP_CONTINUATION_REQUIRED`).
  */
 export async function stopHunt(
   pool: pg.Pool,
@@ -1196,14 +1258,183 @@ export async function stopHunt(
     return { ok: false, reason: 'INVALID_IDEMPOTENCY_KEY' };
   }
 
+  const maxDrainSegments = input.maxDrainSegments ?? DEFAULT_MAX_STOP_DRAIN_SEGMENTS;
+  if (
+    !Number.isSafeInteger(maxDrainSegments) ||
+    maxDrainSegments < 1 ||
+    maxDrainSegments > 10_000
+  ) {
+    return { ok: false, reason: 'INVALID_IDEMPOTENCY_KEY' };
+  }
+
+  if (input.config !== undefined) {
+    try {
+      validateCombatConfig(input.config);
+    } catch {
+      return { ok: false, reason: 'CONFIG_MISMATCH' };
+    }
+    if (!isSupportedSimulationVersion(input.config.version)) {
+      return { ok: false, reason: 'CONFIG_MISMATCH' };
+    }
+  }
+
   const clock = input.clock ?? createSystemClock();
 
-  if (input.settleBeforeStop !== false) {
+  // Step 1: Inspect hunt and transactionally latch a single authoritative stop_requested_at cutoff
+  let stopCutoffMs = 0;
+  const initClient = await pool.connect();
+  try {
+    await initClient.query('BEGIN');
+
+    const huntCheck = await initClient.query<HuntDbRow & { owner_user_id: string }>(
+      `SELECT h.*, c.user_id AS owner_user_id
+       FROM hunts h
+       INNER JOIN characters c ON c.id = h.character_id
+       WHERE h.id = $1
+       LIMIT 1`,
+      [input.huntId]
+    );
+    const initialHunt = huntCheck.rows[0];
+    if (!initialHunt) {
+      await initClient.query('ROLLBACK');
+      return { ok: false, reason: 'HUNT_NOT_FOUND' };
+    }
+    if (
+      (input.characterId !== undefined && initialHunt.character_id !== input.characterId) ||
+      (input.userId !== undefined && initialHunt.owner_user_id !== input.userId)
+    ) {
+      await initClient.query('ROLLBACK');
+      return { ok: false, reason: 'FORBIDDEN_HUNT' };
+    }
+
+    const lockedCharRes = await initClient.query<CharacterDbRow>(
+      'SELECT * FROM characters WHERE id = $1 FOR UPDATE',
+      [initialHunt.character_id]
+    );
+    const lockedHuntRes = await initClient.query<HuntDbRow>(
+      'SELECT * FROM hunts WHERE id = $1 FOR UPDATE',
+      [initialHunt.id]
+    );
+    const lockedChar = lockedCharRes.rows[0];
+    const lockedHunt = lockedHuntRes.rows[0];
+    if (!lockedChar || !lockedHunt) {
+      await initClient.query('ROLLBACK');
+      return { ok: false, reason: 'HUNT_NOT_FOUND' };
+    }
+    if (!isSupportedSimulationVersion(lockedHunt.simulation_version)) {
+      await initClient.query('ROLLBACK');
+      return { ok: false, reason: 'CONFIG_MISMATCH' };
+    }
+
+    let initialCheckpoint: CombatCheckpointState;
+    try {
+      initialCheckpoint = parseAndValidateStoredCheckpoint(
+        lockedHunt.private_checkpoint,
+        lockedHunt.simulation_version,
+        lockedHunt.config_digest
+      );
+    } catch {
+      await initClient.query('ROLLBACK');
+      return { ok: false, reason: 'CORRUPTED_CHECKPOINT' };
+    }
+
+    if (lockedHunt.status === 'COMPLETED') {
+      await initClient.query('ROLLBACK');
+      return {
+        ok: true,
+        status: 'ALREADY_COMPLETED',
+        alreadyCompleted: true,
+        continuationRequired: false,
+        unprocessedDurationMs: 0,
+        segmentsSettled: 0,
+        stopCutoffIso: (
+          lockedHunt.stop_requested_at ??
+          lockedHunt.completed_at ??
+          lockedHunt.settled_until
+        ).toISOString(),
+        hunt: mapPublicHuntView(lockedHunt, initialCheckpoint),
+        character: mapExtendedCharacterDto(lockedChar),
+        unusedHpPotionsReturned: 0,
+        unusedMpPotionsReturned: 0
+      };
+    }
+
+    if (lockedHunt.stop_requested_at !== null) {
+      stopCutoffMs = lockedHunt.stop_requested_at.getTime();
+    } else {
+      if (input.settleBeforeStop === false) {
+        stopCutoffMs = lockedHunt.settled_until.getTime();
+      } else {
+        const remainingCapMs = Math.max(
+          0,
+          initialCheckpoint.snapshot.timings.maxOfflineDurationMs - initialCheckpoint.elapsedMs
+        );
+        const maxCapTimestampMs = lockedHunt.settled_until.getTime() + remainingCapMs;
+        stopCutoffMs = Math.min(
+          Math.max(lockedHunt.settled_until.getTime(), clock.nowMs()),
+          maxCapTimestampMs
+        );
+      }
+      await initClient.query(
+        'UPDATE hunts SET stop_requested_at = $2::timestamptz WHERE id = $1',
+        [lockedHunt.id, new Date(stopCutoffMs).toISOString()]
+      );
+    }
+
+    await initClient.query('COMMIT');
+  } catch (err) {
+    await initClient.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    initClient.release();
+  }
+
+  // Step 2: Bounded drain loop up to the single authoritative stopCutoffMs
+  let segmentsSettled = 0;
+  let drainIterations = 0;
+  const maxDrainIterations = maxDrainSegments * 4;
+  let lastSettleResult: SettleHuntResult | null = null;
+
+  while (
+    input.settleBeforeStop !== false &&
+    segmentsSettled < maxDrainSegments &&
+    drainIterations < maxDrainIterations
+  ) {
+    drainIterations += 1;
+    const stateRes = await pool.query<{
+      status: HuntStatus;
+      settled_until: Date;
+      stop_requested_at: Date | null;
+      row_version: number;
+    }>(
+      'SELECT status, settled_until, stop_requested_at, row_version FROM hunts WHERE id = $1 LIMIT 1',
+      [input.huntId]
+    );
+    const currentHunt = stateRes.rows[0];
+    if (!currentHunt) {
+      return { ok: false, reason: 'HUNT_NOT_FOUND' };
+    }
+    if (currentHunt.status === 'COMPLETED') {
+      break;
+    }
+
+    const effectiveCutoffMs = currentHunt.stop_requested_at
+      ? currentHunt.stop_requested_at.getTime()
+      : stopCutoffMs;
+    const remainingToCutoffMs = Math.max(
+      0,
+      effectiveCutoffMs - currentHunt.settled_until.getTime()
+    );
+    if (remainingToCutoffMs === 0) {
+      break;
+    }
+
+    const stepSegmentKey = `${stopKey}:v${currentHunt.row_version}`;
     const settleRes = await settleHunt(pool, {
       huntId: input.huntId,
       characterId: input.characterId,
       userId: input.userId,
-      segmentKey: `${stopKey}:stop-settle`,
+      segmentKey: stepSegmentKey,
       clock,
       config: input.config
     });
@@ -1216,8 +1447,31 @@ export async function stopHunt(
             : settleRes.reason
       };
     }
+
+    lastSettleResult = settleRes;
+    if (settleRes.status === 'ALREADY_COMPLETED') {
+      break;
+    }
+    if (!settleRes.idempotentReplay) {
+      segmentsSettled += 1;
+    }
+
+    if (
+      input.faultInjection?.failAfterDrainSegments !== undefined &&
+      segmentsSettled >= input.faultInjection.failAfterDrainSegments
+    ) {
+      throw new Error('FAULT_INJECTION: STOP_AFTER_DRAIN_SEGMENT_COMMIT');
+    }
+
+    if (settleRes.hunt.status === 'COMPLETED') {
+      break;
+    }
+    if (Date.parse(settleRes.hunt.settledUntilIso) >= effectiveCutoffMs) {
+      break;
+    }
   }
 
+  // Step 3: Atomic finalization OR safe continuation return if unsettled time remains
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -1271,11 +1525,51 @@ export async function stopHunt(
       return { ok: false, reason: 'CORRUPTED_CHECKPOINT' };
     }
 
+    const effectiveCutoffMs = lockedHunt.stop_requested_at
+      ? lockedHunt.stop_requested_at.getTime()
+      : stopCutoffMs;
+
     if (lockedHunt.status === 'COMPLETED') {
+      await client.query('ROLLBACK');
+      const drainCompletedRewards =
+        lastSettleResult !== null &&
+        lastSettleResult.ok &&
+        !lastSettleResult.idempotentReplay &&
+        lastSettleResult.hunt.status === 'COMPLETED'
+          ? lastSettleResult.rewards
+          : null;
+      return {
+        ok: true,
+        status: drainCompletedRewards !== null ? 'COMPLETED' : 'ALREADY_COMPLETED',
+        alreadyCompleted: drainCompletedRewards === null,
+        continuationRequired: false,
+        unprocessedDurationMs: 0,
+        segmentsSettled,
+        stopCutoffIso: (lockedHunt.completed_at ?? new Date(effectiveCutoffMs)).toISOString(),
+        hunt: mapPublicHuntView(lockedHunt, checkpoint),
+        character: mapExtendedCharacterDto(lockedChar),
+        unusedHpPotionsReturned:
+          drainCompletedRewards !== null ? drainCompletedRewards.unusedHpPotionsReturned : 0,
+        unusedMpPotionsReturned:
+          drainCompletedRewards !== null ? drainCompletedRewards.unusedMpPotionsReturned : 0
+      };
+    }
+
+    // P0 Safety Guard: NEVER finalize hunt or return potions if unsettled time up to cutoff remains
+    const remainingUnsettledMs = Math.max(
+      0,
+      effectiveCutoffMs - lockedHunt.settled_until.getTime()
+    );
+    if (remainingUnsettledMs > 0) {
       await client.query('ROLLBACK');
       return {
         ok: true,
-        alreadyCompleted: true,
+        status: 'STOP_CONTINUATION_REQUIRED',
+        alreadyCompleted: false,
+        continuationRequired: true,
+        unprocessedDurationMs: remainingUnsettledMs,
+        segmentsSettled,
+        stopCutoffIso: new Date(effectiveCutoffMs).toISOString(),
         hunt: mapPublicHuntView(lockedHunt, checkpoint),
         character: mapExtendedCharacterDto(lockedChar),
         unusedHpPotionsReturned: 0,
@@ -1283,19 +1577,16 @@ export async function stopHunt(
       };
     }
 
-    const unusedHp = checkpoint.hpPotionsRemaining;
-    const unusedMp = checkpoint.mpPotionsRemaining;
+    const unusedHp = lockedHunt.potions_returned ? 0 : checkpoint.hpPotionsRemaining;
+    const unusedMp = lockedHunt.potions_returned ? 0 : checkpoint.mpPotionsRemaining;
 
     const stoppedCheckpoint: CombatCheckpointState = {
       ...checkpoint,
       terminated: true,
-      stopReason: checkpoint.stopReason ?? 'ALREADY_TERMINATED'
+      stopReason: 'MANUAL_STOP'
     };
     const serializedStoppedCheckpoint = serializeCombatCheckpoint(stoppedCheckpoint);
-    const completedAtIso =
-      clock.nowMs() >= lockedHunt.settled_until.getTime()
-        ? clock.nowIso()
-        : lockedHunt.settled_until.toISOString();
+    const completedAtIso = new Date(effectiveCutoffMs).toISOString();
 
     const updatedHuntRes = await client.query<HuntDbRow>(
       `UPDATE hunts
@@ -1305,7 +1596,7 @@ export async function stopHunt(
            private_checkpoint = $3::jsonb,
            potions_returned = TRUE,
            row_version = row_version + 1
-       WHERE id = $1
+       WHERE id = $1 AND status = 'ACTIVE'
        RETURNING *`,
       [lockedHunt.id, completedAtIso, serializedStoppedCheckpoint]
     );
@@ -1331,7 +1622,12 @@ export async function stopHunt(
     await client.query('COMMIT');
     return {
       ok: true,
+      status: 'COMPLETED',
       alreadyCompleted: false,
+      continuationRequired: false,
+      unprocessedDurationMs: 0,
+      segmentsSettled,
+      stopCutoffIso: completedAtIso,
       hunt: mapPublicHuntView(updatedHunt, stoppedCheckpoint),
       character: mapExtendedCharacterDto(updatedChar),
       unusedHpPotionsReturned: unusedHp,

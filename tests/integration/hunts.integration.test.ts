@@ -26,6 +26,9 @@ describe('IDLE-004B-1 — Persistent Offline Hunts, Settlement Atomicity, Concur
   const pool = createDatabasePool(dbConfig);
 
   beforeAll(async () => {
+    await pool.query(
+      'DROP TABLE IF EXISTS currency_ledger, hunt_reward_items, hunt_segments, hunts, characters, sessions, users, schema_migrations CASCADE'
+    );
     const migrations = loadMigrationsFromDir();
     await applyMigrations(pool, migrations);
   });
@@ -959,5 +962,429 @@ describe('IDLE-004B-1 — Persistent Offline Hunts, Settlement Atomicity, Concur
     expect(recB.isGoldReconciled).toBe(true);
     expect(recB.isLootReconciled).toBe(true);
     expect(recB.isXpLevelReconciled).toBe(true);
+  });
+
+  it('P0: safely drains an 8h hunt under low event budget on stopHunt without losing time, duplicating rewards, or returning potions prematurely, including mid-drain crash recovery and stop races', async () => {
+    const startEpoch = Date.parse('2026-10-31T00:00:00.000Z');
+    const clockDrained = createFixedClock(startEpoch);
+    const clockReference = createFixedClock(startEpoch);
+
+    const [drainedSeed, refSeed] = await Promise.all([
+      seedUserAndKnight({
+        email: 'p0-drained@example.com',
+        name: 'Sir Drained',
+        level: 14,
+        hp: 380,
+        maxHp: 380,
+        melee: 42,
+        shielding: 40,
+        hpPotions: 4000,
+        mpPotions: 3000,
+        nowIso: clockDrained.nowIso()
+      }),
+      seedUserAndKnight({
+        email: 'p0-reference@example.com',
+        name: 'Sir Reference',
+        level: 14,
+        hp: 380,
+        maxHp: 380,
+        melee: 42,
+        shielding: 40,
+        hpPotions: 4000,
+        mpPotions: 3000,
+        nowIso: clockReference.nowIso()
+      })
+    ]);
+
+    const [startDrained, startRef] = await Promise.all([
+      startHunt(pool, {
+        characterId: drainedSeed.characterId,
+        zoneId: 'damp-catacombs',
+        strategy: 'safe',
+        idempotencyKey: '8h-drained-start',
+        requestedHpPotions: 3500,
+        requestedMpPotions: 2500,
+        seedSource: () => 8080808,
+        clock: clockDrained
+      }),
+      startHunt(pool, {
+        characterId: refSeed.characterId,
+        zoneId: 'damp-catacombs',
+        strategy: 'safe',
+        idempotencyKey: '8h-ref-start',
+        requestedHpPotions: 3500,
+        requestedMpPotions: 2500,
+        seedSource: () => 8080808,
+        clock: clockReference
+      })
+    ]);
+    expect(startDrained.ok && startRef.ok).toBe(true);
+    if (!startDrained.ok || !startRef.ok) return;
+
+    const eightHoursMs = 8 * 3_600_000; // 28,800,000 ms
+    clockDrained.advanceMs(eightHoursMs);
+    clockReference.advanceMs(eightHoursMs);
+
+    // Very low event budget: ~13,000 events in 8h -> with maxEventsPerCall=400 it needs ~33 segments
+    const lowBudgetConfig = {
+      ...DEFAULT_COMBAT_SIMULATION_CONFIG,
+      maxEventsPerCall: 400
+    };
+
+    // 1. First stopHunt call with bounded maxDrainSegments=6 MUST NOT finalize the hunt or return potions
+    const stopStep1 = await stopHunt(pool, {
+      huntId: startDrained.hunt.huntId,
+      stopIdempotencyKey: 'stop-8h-key',
+      settleBeforeStop: true,
+      maxDrainSegments: 6,
+      clock: clockDrained,
+      config: lowBudgetConfig
+    });
+    expect(stopStep1.ok).toBe(true);
+    if (!stopStep1.ok) return;
+
+    expect(stopStep1.status).toBe('STOP_CONTINUATION_REQUIRED');
+    expect(stopStep1.continuationRequired).toBe(true);
+    expect(stopStep1.alreadyCompleted).toBe(false);
+    expect(stopStep1.segmentsSettled).toBe(6);
+    expect(stopStep1.unprocessedDurationMs).toBeGreaterThan(0);
+    expect(stopStep1.unprocessedDurationMs).toBeLessThan(eightHoursMs);
+    expect(stopStep1.hunt.status).toBe('ACTIVE');
+    expect(stopStep1.hunt.potionsReturned).toBe(false);
+    expect(stopStep1.unusedHpPotionsReturned).toBe(0);
+    expect(stopStep1.unusedMpPotionsReturned).toBe(0);
+    expect(stopStep1.character.hpPotions).toBe(500); // 4000 initial - 3500 reserved, 0 returned yet
+    expect(Date.parse(stopStep1.stopCutoffIso)).toBe(startEpoch + eightHoursMs);
+
+    // 2. Simulate crash after committing 3 more intermediate drain segments
+    // Also advance clock by +10 minutes to prove the single stopCutoffIso remains locked at 8h!
+    clockDrained.advanceMs(10 * 60 * 1000);
+    await expect(
+      stopHunt(pool, {
+        huntId: startDrained.hunt.huntId,
+        stopIdempotencyKey: 'stop-8h-key',
+        settleBeforeStop: true,
+        maxDrainSegments: 6,
+        clock: clockDrained,
+        config: lowBudgetConfig,
+        faultInjection: { failAfterDrainSegments: 3 }
+      })
+    ).rejects.toThrow('FAULT_INJECTION: STOP_AFTER_DRAIN_SEGMENT_COMMIT');
+
+    // Verify intermediate economy is 100% reconciled right after the mid-drain crash
+    const recMidCrash = await reconcileCharacterEconomy(pool, drainedSeed.characterId);
+    expect(recMidCrash.isGoldReconciled).toBe(true);
+    expect(recMidCrash.isLootReconciled).toBe(true);
+    expect(recMidCrash.isXpLevelReconciled).toBe(true);
+
+    // 3. Also test concurrent race during continuation: stopHunt vs settleHunt + two concurrent stopHunt calls
+    const [raceStopA, raceStopB, raceSettle] = await Promise.all([
+      stopHunt(pool, {
+        huntId: startDrained.hunt.huntId,
+        stopIdempotencyKey: 'stop-8h-key',
+        settleBeforeStop: true,
+        maxDrainSegments: 4,
+        clock: clockDrained,
+        config: lowBudgetConfig
+      }),
+      stopHunt(pool, {
+        huntId: startDrained.hunt.huntId,
+        stopIdempotencyKey: 'stop-8h-concurrent-key',
+        settleBeforeStop: true,
+        maxDrainSegments: 4,
+        clock: clockDrained,
+        config: lowBudgetConfig
+      }),
+      settleHunt(pool, {
+        huntId: startDrained.hunt.huntId,
+        segmentKey: 'concurrent-mid-stop-settle',
+        clock: clockDrained,
+        config: lowBudgetConfig
+      })
+    ]);
+    expect(raceStopA.ok && raceStopB.ok && raceSettle.ok).toBe(true);
+    if (!raceStopA.ok || !raceStopB.ok) return;
+    expect(raceStopA.status).toBe('STOP_CONTINUATION_REQUIRED');
+    expect(raceStopB.status).toBe('STOP_CONTINUATION_REQUIRED');
+
+    // 4. Continue retrying stopHunt until continuationRequired === false
+    let finalStop: typeof stopStep1 = raceStopA;
+    let safetyRetries = 0;
+    while (finalStop.ok && finalStop.continuationRequired) {
+      safetyRetries += 1;
+      expect(safetyRetries).toBeLessThan(30);
+      const nextStop = await stopHunt(pool, {
+        huntId: startDrained.hunt.huntId,
+        stopIdempotencyKey: 'stop-8h-key',
+        settleBeforeStop: true,
+        maxDrainSegments: 8,
+        clock: clockDrained,
+        config: lowBudgetConfig
+      });
+      expect(nextStop.ok).toBe(true);
+      if (!nextStop.ok) return;
+      finalStop = nextStop;
+    }
+
+    expect(finalStop.ok).toBe(true);
+    if (!finalStop.ok) return;
+    expect(finalStop.status).toBe('COMPLETED');
+    expect(finalStop.continuationRequired).toBe(false);
+    expect(finalStop.unprocessedDurationMs).toBe(0);
+    expect(finalStop.hunt.status).toBe('COMPLETED');
+    expect(finalStop.hunt.stopReason).toBe('MANUAL_STOP');
+    expect(finalStop.hunt.checkpointView.stopReason).toBe('MANUAL_STOP');
+    expect(finalStop.hunt.checkpointView.terminated).toBe(true);
+    expect(finalStop.hunt.checkpointView.elapsedMs).toBe(eightHoursMs);
+    expect(Date.parse(finalStop.hunt.settledUntilIso)).toBe(startEpoch + eightHoursMs);
+    expect(Date.parse(finalStop.hunt.completedAtIso ?? '')).toBe(startEpoch + eightHoursMs);
+    expect(finalStop.hunt.potionsReturned).toBe(true);
+
+    // 5. Settle & stop the continuous 8h reference hunt in a single default budget pass
+    const refStop = await stopHunt(pool, {
+      huntId: startRef.hunt.huntId,
+      stopIdempotencyKey: 'stop-ref-key',
+      settleBeforeStop: true,
+      clock: clockReference
+    });
+    expect(refStop.ok).toBe(true);
+    if (!refStop.ok) return;
+
+    // Bit-for-bit identical combat results and zero lost time / zero duplicate rewards
+    expect({
+      ...finalStop.hunt.checkpointView,
+      configDigest: 'normalized'
+    }).toEqual({
+      ...refStop.hunt.checkpointView,
+      configDigest: 'normalized'
+    });
+    expect(finalStop.character.stats).toEqual(refStop.character.stats);
+    expect(finalStop.character.hpPotions).toBe(refStop.character.hpPotions);
+    expect(finalStop.character.mpPotions).toBe(refStop.character.mpPotions);
+    expect(
+      finalStop.character.hpPotions + finalStop.hunt.checkpointView.hpPotionsUsed
+    ).toBe(4000);
+    expect(
+      finalStop.character.mpPotions + finalStop.hunt.checkpointView.mpPotionsUsed
+    ).toBe(3000);
+
+    // 6. Multiple stopHunt retries after COMPLETED are idempotent no-ops
+    const [retryAfter1, retryAfter2] = await Promise.all([
+      stopHunt(pool, {
+        huntId: startDrained.hunt.huntId,
+        stopIdempotencyKey: 'stop-8h-key',
+        clock: clockDrained
+      }),
+      stopHunt(pool, {
+        huntId: startDrained.hunt.huntId,
+        stopIdempotencyKey: 'stop-8h-key-extra',
+        clock: clockDrained
+      })
+    ]);
+    expect(retryAfter1.ok && retryAfter2.ok).toBe(true);
+    if (!retryAfter1.ok || !retryAfter2.ok) return;
+    expect(retryAfter1.alreadyCompleted).toBe(true);
+    expect(retryAfter1.unusedHpPotionsReturned).toBe(0);
+    expect(retryAfter2.alreadyCompleted).toBe(true);
+    expect(retryAfter2.unusedHpPotionsReturned).toBe(0);
+
+    const [recDrained, recRef] = await Promise.all([
+      reconcileCharacterEconomy(pool, drainedSeed.characterId),
+      reconcileCharacterEconomy(pool, refSeed.characterId)
+    ]);
+    expect(recDrained.isGoldReconciled).toBe(true);
+    expect(recDrained.isLootReconciled).toBe(true);
+    expect(recDrained.isXpLevelReconciled).toBe(true);
+    expect(recDrained.characterGold).toBe(recRef.characterGold);
+    expect(recDrained.characterXp).toBe(recRef.characterXp);
+    expect(recDrained.totalUnclaimedItemsByCode).toEqual(recRef.totalUnclaimedItemsByCode);
+  });
+
+  it('P1: preserves frozen balance rules and RNG for existing hunts across config version rollover (Config A -> Config B)', async () => {
+    const startEpoch = Date.parse('2026-10-31T21:00:00.000Z');
+    const clockRollover = createFixedClock(startEpoch);
+    const clockPureA = createFixedClock(startEpoch);
+
+    const [charRollover, charPureA, charNewB] = await Promise.all([
+      seedUserAndKnight({
+        email: 'rollover-a@example.com',
+        name: 'Knight Rollover',
+        level: 10,
+        melee: 32,
+        shielding: 30,
+        nowIso: clockRollover.nowIso()
+      }),
+      seedUserAndKnight({
+        email: 'pure-a@example.com',
+        name: 'Knight PureA',
+        level: 10,
+        melee: 32,
+        shielding: 30,
+        nowIso: clockPureA.nowIso()
+      }),
+      seedUserAndKnight({
+        email: 'new-b@example.com',
+        name: 'Knight NewB',
+        level: 10,
+        melee: 32,
+        shielding: 30,
+        nowIso: clockRollover.nowIso()
+      })
+    ]);
+
+    const configVersionA = {
+      ...DEFAULT_COMBAT_SIMULATION_CONFIG,
+      version: '1.0.0'
+    };
+
+    const stalkerA = DEFAULT_COMBAT_SIMULATION_CONFIG.monsters['cellar-stalker'];
+    const carapaceA = DEFAULT_COMBAT_SIMULATION_CONFIG.monsters['mire-carapace'];
+    if (!stalkerA || !carapaceA) {
+      throw new Error('Missing damp-catacombs monsters');
+    }
+
+    // Config Version B (simulating a balance patch on server restart: 10x XP and 10x Gold)
+    const configVersionB = {
+      ...DEFAULT_COMBAT_SIMULATION_CONFIG,
+      version: '1.1.0',
+      monsters: {
+        ...DEFAULT_COMBAT_SIMULATION_CONFIG.monsters,
+        'cellar-stalker': {
+          ...stalkerA,
+          xpReward: stalkerA.xpReward * 10,
+          goldMin: stalkerA.goldMin * 10,
+          goldMax: stalkerA.goldMax * 10
+        },
+        'mire-carapace': {
+          ...carapaceA,
+          xpReward: carapaceA.xpReward * 10,
+          goldMin: carapaceA.goldMin * 10,
+          goldMax: carapaceA.goldMax * 10
+        }
+      }
+    };
+
+    // Step A & B: Start Hunt A under Config Version A and persist checkpoint in PostgreSQL
+    const [startRolloverA, startPureA] = await Promise.all([
+      startHunt(pool, {
+        characterId: charRollover.characterId,
+        zoneId: 'damp-catacombs',
+        strategy: 'balanced',
+        idempotencyKey: 'rollover-hunt-a',
+        seedSource: () => 515151,
+        clock: clockRollover,
+        config: configVersionA
+      }),
+      startHunt(pool, {
+        characterId: charPureA.characterId,
+        zoneId: 'damp-catacombs',
+        strategy: 'balanced',
+        idempotencyKey: 'pure-hunt-a',
+        seedSource: () => 515151,
+        clock: clockPureA,
+        config: configVersionA
+      })
+    ]);
+    expect(startRolloverA.ok && startPureA.ok).toBe(true);
+    if (!startRolloverA.ok || !startPureA.ok) return;
+
+    // Settle first 15m under Config Version A before restart
+    clockRollover.advanceMs(15 * 60 * 1000);
+    clockPureA.advanceMs(15 * 60 * 1000);
+
+    const [seg1Rollover, seg1PureA] = await Promise.all([
+      settleHunt(pool, {
+        huntId: startRolloverA.hunt.huntId,
+        segmentKey: 'seg-15m',
+        clock: clockRollover,
+        config: configVersionA
+      }),
+      settleHunt(pool, {
+        huntId: startPureA.hunt.huntId,
+        segmentKey: 'seg-15m',
+        clock: clockPureA,
+        config: configVersionA
+      })
+    ]);
+    expect(seg1Rollover.ok && seg1PureA.ok).toBe(true);
+
+    // Step C & D: Server restarts with Config Version B (1.1.0, 10x XP/gold).
+    // Also start a brand-new Hunt B after the restart using Config Version B.
+    const startHuntB = await startHunt(pool, {
+      characterId: charNewB.characterId,
+      zoneId: 'damp-catacombs',
+      strategy: 'balanced',
+      idempotencyKey: 'new-hunt-b',
+      seedSource: () => 515151,
+      clock: clockRollover,
+      config: configVersionB
+    });
+    expect(startHuntB.ok).toBe(true);
+    if (!startHuntB.ok) return;
+    expect(startHuntB.hunt.simulationVersion).toBe('1.1.0');
+
+    // Advance another 30 minutes and settle Hunt A while server passes Config Version B!
+    clockRollover.advanceMs(30 * 60 * 1000);
+    clockPureA.advanceMs(30 * 60 * 1000);
+
+    const [seg2RolloverUnderB, seg2PureAUnderA, seg1NewBUnderB] = await Promise.all([
+      settleHunt(pool, {
+        huntId: startRolloverA.hunt.huntId,
+        segmentKey: 'seg-45m-under-b',
+        clock: clockRollover,
+        config: configVersionB
+      }),
+      settleHunt(pool, {
+        huntId: startPureA.hunt.huntId,
+        segmentKey: 'seg-45m-under-a',
+        clock: clockPureA,
+        config: configVersionA
+      }),
+      settleHunt(pool, {
+        huntId: startHuntB.hunt.huntId,
+        segmentKey: 'seg-new-b-30m',
+        clock: clockRollover,
+        config: configVersionB
+      })
+    ]);
+
+    expect(seg2RolloverUnderB.ok && seg2PureAUnderA.ok && seg1NewBUnderB.ok).toBe(true);
+    if (!seg2RolloverUnderB.ok || !seg2PureAUnderA.ok || !seg1NewBUnderB.ok) return;
+
+    // Hunt A settled under Config B runtime MUST preserve Config A's version, digest, RNG, and exact rewards!
+    expect(seg2RolloverUnderB.hunt.simulationVersion).toBe('1.0.0');
+    expect(seg2RolloverUnderB.hunt.configDigest).toBe(startRolloverA.hunt.configDigest);
+    expect(seg2RolloverUnderB.rewards).toEqual(seg2PureAUnderA.rewards);
+    expect({
+      ...seg2RolloverUnderB.hunt.checkpointView,
+      configDigest: 'normalized'
+    }).toEqual({
+      ...seg2PureAUnderA.hunt.checkpointView,
+      configDigest: 'normalized'
+    });
+
+    // Meanwhile, New Hunt B started under Config B earned ~10x XP/gold for its 30m window
+    expect(seg1NewBUnderB.rewards.deltaXpGained).toBeGreaterThan(
+      seg2RolloverUnderB.rewards.deltaXpGained * 5
+    );
+
+    // Stopping Hunt A under Config B also succeeds cleanly with consistent MANUAL_STOP reason
+    const stopRolloverA = await stopHunt(pool, {
+      huntId: startRolloverA.hunt.huntId,
+      stopIdempotencyKey: 'stop-rollover-a',
+      settleBeforeStop: true,
+      clock: clockRollover,
+      config: configVersionB
+    });
+    expect(stopRolloverA.ok).toBe(true);
+    if (!stopRolloverA.ok) return;
+    expect(stopRolloverA.hunt.status).toBe('COMPLETED');
+    expect(stopRolloverA.hunt.stopReason).toBe('MANUAL_STOP');
+    expect(stopRolloverA.hunt.checkpointView.stopReason).toBe('MANUAL_STOP');
+
+    const recRollover = await reconcileCharacterEconomy(pool, charRollover.characterId);
+    expect(recRollover.isGoldReconciled).toBe(true);
+    expect(recRollover.isLootReconciled).toBe(true);
+    expect(recRollover.isXpLevelReconciled).toBe(true);
   });
 });
