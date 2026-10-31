@@ -11,8 +11,19 @@ import {
 } from './types.js';
 
 export const COMBAT_SIMULATION_VERSION = '1.0.0' as const;
+export const SUPPORTED_SIMULATION_ENGINE_MAJOR = 1 as const;
 export const MAX_OFFLINE_DURATION_MS = 86_400_000 as const; // 24 hours in ms
 export const DEFAULT_MAX_EVENTS_PER_CALL = 500_000 as const;
+
+/**
+ * Checks whether a simulation version string belongs to the supported v1.x deterministic
+ * combat simulation engine family (e.g. '1.0.0', '1.1.0', '1.2.0-balance.1').
+ * Balance/config changes within 1.x execute against the hunt's frozen HuntConfigurationSnapshot,
+ * whereas breaking 2.x+ algorithm changes require a dedicated versioned engine runner.
+ */
+export function isSupportedSimulationVersion(version: string): boolean {
+  return typeof version === 'string' && /^1\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version);
+}
 
 export const MAX_POTION_STACK_COUNT = 1_000_000 as const;
 export const MIN_POTION_HEAL_AMOUNT = 1 as const;
@@ -510,21 +521,92 @@ export function computeDeterministicDigest(canonicalPayload: string): string {
   return `v1:${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
 }
 
+function canonicalizeJsonValue(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeJsonValue);
+  }
+  const record = value as Record<string, unknown>;
+  const sortedKeys = Object.keys(record).sort();
+  const normalized: Record<string, unknown> = {};
+  for (const key of sortedKeys) {
+    normalized[key] = canonicalizeJsonValue(record[key]);
+  }
+  return normalized;
+}
+
+export function canonicalizeHuntSnapshotPayload(
+  snapshot: Omit<HuntConfigurationSnapshot, 'configDigest'>
+): string {
+  return JSON.stringify(
+    canonicalizeJsonValue({
+      simulationVersion: snapshot.simulationVersion,
+      zoneId: snapshot.zoneId,
+      strategy: snapshot.strategy,
+      timings: snapshot.timings,
+      strategyProfile: snapshot.strategyProfile,
+      zone: snapshot.zone,
+      monsters: snapshot.monsters,
+      character: snapshot.character,
+      resources: snapshot.resources
+    })
+  );
+}
+
 export function computeHuntSnapshotDigest(
   snapshot: Omit<HuntConfigurationSnapshot, 'configDigest'>
 ): string {
-  const canonical = JSON.stringify({
-    simulationVersion: snapshot.simulationVersion,
-    zoneId: snapshot.zoneId,
-    strategy: snapshot.strategy,
-    timings: snapshot.timings,
-    strategyProfile: snapshot.strategyProfile,
-    zone: snapshot.zone,
-    monsters: snapshot.monsters,
-    character: snapshot.character,
-    resources: snapshot.resources
-  });
+  const canonical = canonicalizeHuntSnapshotPayload(snapshot);
   return computeDeterministicDigest(canonical);
+}
+
+/**
+ * Full structural equality check over canonicalized HuntConfigurationSnapshot payloads.
+ * Guarantees that configuration integrity checks never rely solely on the 64-bit FNV-1a digest.
+ */
+export function areHuntSnapshotsStructurallyEqual(
+  a: Omit<HuntConfigurationSnapshot, 'configDigest'>,
+  b: Omit<HuntConfigurationSnapshot, 'configDigest'>
+): boolean {
+  return canonicalizeHuntSnapshotPayload(a) === canonicalizeHuntSnapshotPayload(b);
+}
+
+/**
+ * Reconstructs an immutable CombatSimulationConfig from a hunt's frozen HuntConfigurationSnapshot
+ * so that hunts started under an older 1.x balance configuration continue settling with their
+ * exact original balance parameters after a server config rollover, while respecting runtime
+ * execution budgets (`maxEventsPerCall`).
+ */
+export function reconstructSimulationConfigFromSnapshot(
+  snapshot: HuntConfigurationSnapshot,
+  options?: { readonly maxEventsPerCall?: number | undefined }
+): CombatSimulationConfig {
+  if (!isSupportedSimulationVersion(snapshot.simulationVersion)) {
+    throw new RangeError(
+      `Unsupported simulation engine version '${snapshot.simulationVersion}' in hunt snapshot`
+    );
+  }
+  const reconstructed: CombatSimulationConfig = {
+    version: snapshot.simulationVersion,
+    maxOfflineDurationMs: snapshot.timings.maxOfflineDurationMs,
+    maxEventsPerCall: options?.maxEventsPerCall ?? DEFAULT_MAX_EVENTS_PER_CALL,
+    playerAttackIntervalMs: snapshot.timings.playerAttackIntervalMs,
+    passiveRegenIntervalMs: snapshot.timings.passiveRegenIntervalMs,
+    passiveHpRegenAmount: snapshot.timings.passiveHpRegenAmount,
+    passiveMpRegenAmount: snapshot.timings.passiveMpRegenAmount,
+    strategies: {
+      ...DEFAULT_STRATEGIES_CONFIG,
+      [snapshot.strategy]: snapshot.strategyProfile
+    },
+    zones: {
+      [snapshot.zoneId]: snapshot.zone
+    },
+    monsters: snapshot.monsters
+  };
+  validateCombatConfig(reconstructed);
+  return deepFreeze(reconstructed);
 }
 
 export function deepFreeze<T>(value: T): Readonly<T> {

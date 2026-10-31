@@ -385,6 +385,17 @@ export async function createCharacterTransactional(
       throw new Error('Failed to insert character');
     }
 
+    if (stats.gold > 0) {
+      await client.query(
+        `INSERT INTO currency_ledger (
+           id, character_id, source_type, source_id, amount, balance_after, transaction_type, created_at
+         )
+         VALUES ($1, $2, 'CHARACTER_INITIAL_GRANT', $2, $3, $3, 'CREDIT', $4::timestamptz)
+         ON CONFLICT (character_id, source_type, source_id) DO NOTHING`,
+        [randomUUID(), characterId, stats.gold, params.nowIso]
+      );
+    }
+
     await client.query('COMMIT');
     return { ok: true, character: mapCharacterDto(row) };
   } catch (err) {

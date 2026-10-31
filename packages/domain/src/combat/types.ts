@@ -9,6 +9,7 @@ export const HUNT_STOP_REASONS = [
   'MAX_OFFLINE_CAP_REACHED',
   'CHARACTER_DIED',
   'OUT_OF_HP_POTIONS_CRITICAL',
+  'MANUAL_STOP',
   'ALREADY_TERMINATED'
 ] as const;
 export type HuntStopReason = (typeof HUNT_STOP_REASONS)[number];

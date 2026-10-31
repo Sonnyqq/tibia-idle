@@ -1,4 +1,5 @@
 import {
+  calculateCharacterVitalsForLevel,
   calculateLevelXpProgress,
   calculateTotalXpForLevel,
   createFixedClock,
@@ -7,6 +8,7 @@ import {
   INITIAL_ZONES_CATALOG,
   MAX_CHARACTERS_PER_ACCOUNT,
   normalizeEmail,
+  resolveLevelFromTotalXp,
   SIMULATION_VERSION,
   validateCharacterNameDomain,
   VOCATION_STARTING_CONFIG
@@ -106,8 +108,21 @@ describe('@tibia-idle/domain smoke & unit tests', () => {
 
     expect(calculateTotalXpForLevel(1)).toBe(0);
     expect(calculateTotalXpForLevel(2)).toBe(100);
+    expect(calculateTotalXpForLevel(3)).toBe(300);
     const progress = calculateLevelXpProgress(1, 45);
     expect(progress.nextLevelXp).toBe(100);
     expect(progress.progressPercent).toBe(45);
+
+    expect(resolveLevelFromTotalXp(0)).toBe(1);
+    expect(resolveLevelFromTotalXp(99)).toBe(1);
+    expect(resolveLevelFromTotalXp(100)).toBe(2);
+    expect(resolveLevelFromTotalXp(299)).toBe(2);
+    expect(resolveLevelFromTotalXp(300)).toBe(3);
+    expect(resolveLevelFromTotalXp(calculateTotalXpForLevel(25))).toBe(25);
+    expect(() => resolveLevelFromTotalXp(-1)).toThrow(RangeError);
+    expect(() => resolveLevelFromTotalXp(Number.NaN)).toThrow(RangeError);
+
+    expect(calculateCharacterVitalsForLevel('knight', 1)).toEqual({ maxHp: 185, maxMp: 40 });
+    expect(calculateCharacterVitalsForLevel('knight', 5)).toEqual({ maxHp: 245, maxMp: 60 });
   });
 });
