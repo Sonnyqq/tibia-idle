@@ -1121,13 +1121,106 @@ body {
 
 .backpack-slots-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, 38px);
+  grid-template-columns: repeat(5, 38px);
   max-width: 348px;
   gap: 4px;
   padding: 5px;
   background-color: var(--game-inset);
   border: 1px solid var(--game-border);
   justify-content: start;
+}
+
+.backpack-slot-cell {
+  cursor: pointer;
+  display: inline-block;
+  user-select: none;
+}
+
+.backpack-slot-cell:hover {
+  filter: brightness(1.15);
+}
+
+.slot-cell-selected {
+  outline: 2px solid var(--accent-gold);
+  outline-offset: -1px;
+}
+
+.slot-cell-target {
+  outline: 2px dashed #4ade80;
+  outline-offset: -1px;
+  animation: pulse-target 1s infinite alternate;
+}
+
+@keyframes pulse-target {
+  from { opacity: 0.7; }
+  to { opacity: 1; }
+}
+
+.inventory-header-stats {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.inventory-action-panel {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background-color: var(--game-inset);
+  border: 1px solid var(--game-border);
+  min-height: 48px;
+}
+
+.selected-item-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.selected-item-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.selected-item-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.selected-buttons-row,
+.split-buttons-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.split-controls-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.split-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+.split-slider {
+  width: 100%;
+  accent-color: var(--accent-gold);
+}
+
+.reward-item-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  margin-left: auto;
 }
 
 /* Docked right-hand equipment & backpack */

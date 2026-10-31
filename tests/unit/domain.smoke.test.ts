@@ -1,11 +1,16 @@
 import {
+  calculateCharacterMaxCapacity,
   calculateCharacterVitalsForLevel,
+  calculateInventoryCapacity,
+  calculateInventoryWeight,
   calculateLevelXpProgress,
   calculateTotalXpForLevel,
   createFixedClock,
   createInitialCharacterStats,
   createSeededRng,
+  getItemDefinition,
   INITIAL_ZONES_CATALOG,
+  ITEM_DEFINITIONS,
   MAX_CHARACTERS_PER_ACCOUNT,
   normalizeEmail,
   resolveLevelFromTotalXp,
@@ -124,5 +129,67 @@ describe('@tibia-idle/domain smoke & unit tests', () => {
 
     expect(calculateCharacterVitalsForLevel('knight', 1)).toEqual({ maxHp: 185, maxMp: 40 });
     expect(calculateCharacterVitalsForLevel('knight', 5)).toEqual({ maxHp: 245, maxMp: 60 });
+  });
+
+  it('validates server-authoritative item catalog definitions for all 12 items and capacity formulas', () => {
+    const all12CatalogIds = [
+      'copper-coin',
+      'rat-pelt',
+      'chitin-plate',
+      'glow-moss',
+      'ancient-bone',
+      'rusted-blade',
+      'wraith-essence',
+      'silver-ring',
+      'drake-scale',
+      'ash-talon',
+      'ember-scroll',
+      'ritual-amulet'
+    ];
+
+    expect(ITEM_DEFINITIONS).toHaveLength(12);
+    for (const id of all12CatalogIds) {
+      const def = getItemDefinition(id);
+      expect(def).toBeDefined();
+      if (!def) throw new Error(`Missing item definition: ${id}`);
+      expect(def.itemId).toBe(id);
+      expect(Number.isSafeInteger(def.weightUnits)).toBe(true);
+      expect(def.weightUnits).toBeGreaterThanOrEqual(1);
+      expect(Number.isSafeInteger(def.maxStackSize)).toBe(true);
+      expect(def.maxStackSize).toBeGreaterThanOrEqual(1);
+
+      if (def?.stackable) {
+        expect(def.maxStackSize).toBe(100);
+      } else {
+        expect(def?.maxStackSize).toBe(1);
+        expect(def?.equipmentSlot).toBeDefined();
+      }
+    }
+
+    // Capacity scaling per vocation
+    expect(calculateCharacterMaxCapacity('knight', 1)).toBe(5000);
+    expect(calculateCharacterMaxCapacity('knight', 2)).toBe(5250);
+    expect(calculateCharacterMaxCapacity('paladin', 1)).toBe(4000);
+    expect(calculateCharacterMaxCapacity('paladin', 3)).toBe(4400);
+    expect(calculateCharacterMaxCapacity('sorcerer', 1)).toBe(3000);
+    expect(calculateCharacterMaxCapacity('druid', 1)).toBe(3000);
+
+    // Inventory weight calculation
+    const testItems = [
+      { itemId: 'copper-coin', quantity: 100 }, // 100 * 1 = 100
+      { itemId: 'rusted-blade', quantity: 1 },  // 1 * 250 = 250
+      { itemId: 'rat-pelt', quantity: 20 }      // 20 * 5 = 100
+    ];
+    const weight = calculateInventoryWeight(testItems);
+    expect(weight).toBe(450);
+
+    const cap = calculateInventoryCapacity('knight', 1, testItems, 20);
+    expect(cap).toEqual({
+      currentWeight: 450,
+      maxWeight: 5000,
+      remainingCapacity: 4550,
+      occupiedSlots: 3,
+      maxSlots: 20
+    });
   });
 });

@@ -54,6 +54,8 @@ export interface HuntsViewProps {
   onRefreshRewardItems: () => Promise<void>;
   latestCompletedHuntId?: string | null;
   onOpenLatestReport?: () => Promise<void>;
+  onClaimReward?: (rewardId: string) => Promise<void>;
+  claimingRewardId?: string | null;
 }
 
 export function HuntsView({
@@ -73,7 +75,9 @@ export function HuntsView({
   onCloseHuntReport,
   rewardItems,
   latestCompletedHuntId,
-  onOpenLatestReport
+  onOpenLatestReport,
+  onClaimReward,
+  claimingRewardId
 }: HuntsViewProps) {
   const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
   const [selectedStrategy, setSelectedStrategy] = useState<HuntStrategyDto>('balanced');
@@ -784,6 +788,20 @@ export function HuntsView({
                       </span>
                     </div>
                   </div>
+                  {onClaimReward && item.ownershipState === 'UNCLAIMED' && (
+                    <div className="reward-item-actions">
+                      <GameButton
+                        variant="primary"
+                        onClick={() => void onClaimReward(item.id)}
+                        disabled={huntActionLoading || claimingRewardId === item.id}
+                        testId={`hunt-claim-reward-btn-${item.id}`}
+                      >
+                        {claimingRewardId === item.id
+                          ? t(locale, 'inventory.claiming')
+                          : t(locale, 'inventory.claimReward')}
+                      </GameButton>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

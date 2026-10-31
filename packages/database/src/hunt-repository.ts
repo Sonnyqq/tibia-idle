@@ -235,6 +235,8 @@ export interface ReconcileCharacterEconomyReport {
   readonly latestLedgerBalanceAfter: number;
   readonly isGoldReconciled: boolean;
   readonly totalUnclaimedItemsByCode: Readonly<Record<string, number>>;
+  readonly totalClaimedItemsByCode: Readonly<Record<string, number>>;
+  readonly totalMovementClaimedItemsByCode: Readonly<Record<string, number>>;
   readonly totalSettledItemsByCode: Readonly<Record<string, number>>;
   readonly isLootReconciled: boolean;
   readonly totalSettledXp: number;
@@ -1692,16 +1694,40 @@ export async function reconcileCharacterEconomy(
     latestLedgerBalanceAfter = Number(row.balance_after);
   }
 
-  const rewardItemsRes = await pool.query<{ item_id: string; total_qty: string | number }>(
+  const unclaimedItemsRes = await pool.query<{ item_id: string; total_qty: string | number }>(
     `SELECT item_id, SUM(quantity) AS total_qty
      FROM hunt_reward_items
-     WHERE character_id = $1
+     WHERE character_id = $1 AND ownership_state = 'UNCLAIMED'
      GROUP BY item_id`,
     [characterId]
   );
   const totalUnclaimedItemsByCode: Record<string, number> = {};
-  for (const row of rewardItemsRes.rows) {
+  for (const row of unclaimedItemsRes.rows) {
     totalUnclaimedItemsByCode[row.item_id] = Number(row.total_qty);
+  }
+
+  const claimedItemsRes = await pool.query<{ item_id: string; total_qty: string | number }>(
+    `SELECT item_id, SUM(quantity) AS total_qty
+     FROM hunt_reward_items
+     WHERE character_id = $1 AND ownership_state = 'CLAIMED'
+     GROUP BY item_id`,
+    [characterId]
+  );
+  const totalClaimedItemsByCode: Record<string, number> = {};
+  for (const row of claimedItemsRes.rows) {
+    totalClaimedItemsByCode[row.item_id] = Number(row.total_qty);
+  }
+
+  const movementClaimedRes = await pool.query<{ item_id: string; total_qty: string | number }>(
+    `SELECT item_id, SUM(quantity) AS total_qty
+     FROM inventory_movements
+     WHERE character_id = $1 AND operation_type = 'CLAIM_HUNT_REWARD'
+     GROUP BY item_id`,
+    [characterId]
+  );
+  const totalMovementClaimedItemsByCode: Record<string, number> = {};
+  for (const row of movementClaimedRes.rows) {
+    totalMovementClaimedItemsByCode[row.item_id] = Number(row.total_qty);
   }
 
   const segmentsRes = await pool.query<{ rewards: SettlementSegmentRewardsSummary }>(
@@ -1754,11 +1780,22 @@ export async function reconcileCharacterEconomy(
 
   const allItemCodes = new Set([
     ...Object.keys(totalUnclaimedItemsByCode),
-    ...Object.keys(totalSettledItemsByCode)
+    ...Object.keys(totalClaimedItemsByCode),
+    ...Object.keys(totalSettledItemsByCode),
+    ...Object.keys(totalMovementClaimedItemsByCode)
   ]);
   let isLootReconciled = true;
   for (const code of allItemCodes) {
-    if ((totalUnclaimedItemsByCode[code] ?? 0) !== (totalSettledItemsByCode[code] ?? 0)) {
+    const unclaimed = totalUnclaimedItemsByCode[code] ?? 0;
+    const claimed = totalClaimedItemsByCode[code] ?? 0;
+    const settled = totalSettledItemsByCode[code] ?? 0;
+    const movementClaimed = totalMovementClaimedItemsByCode[code] ?? 0;
+
+    if (settled !== unclaimed + claimed) {
+      isLootReconciled = false;
+      break;
+    }
+    if (claimed !== movementClaimed) {
       isLootReconciled = false;
       break;
     }
@@ -1774,6 +1811,8 @@ export async function reconcileCharacterEconomy(
     latestLedgerBalanceAfter,
     isGoldReconciled,
     totalUnclaimedItemsByCode,
+    totalClaimedItemsByCode,
+    totalMovementClaimedItemsByCode,
     totalSettledItemsByCode,
     isLootReconciled,
     totalSettledXp,

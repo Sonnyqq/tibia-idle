@@ -34,7 +34,8 @@ All stages start **NOT STARTED**; a roadmap line is not evidence of code. No mer
 **Exit:** class strengths vary by zone, consistent XP/hour and cost explanations.
 
 ## P04 — inventory and economy foundation
-- [ ] Equipped items, stack rules, inventory capacity, loot filter, provenance.
+- [x] Persistent inventory, 20-slot starting backpack, integer capacity/weight, item stacking, empty moves, slot swaps, stack splitting, AFK reward inbox atomic claim (`IDLE-005A`).
+- [ ] Equipped items (paperdoll equipment stats & weapon requirements P04B), loot filter, provenance.
 - [ ] Gold ledger, purchase/sell to NPC, atomic transactions; abuse/race tests.
 - [ ] 120 base items target reached incrementally; versioned loot tables.
 **Exit:** zero dupes in crash/race test harness, reconciled economy.
