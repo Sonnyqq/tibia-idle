@@ -282,6 +282,7 @@
   "error.levelTooLow": "Character level is too low to equip this item",
   "error.vocationIncompatible": "This item cannot be equipped by your vocation",
   "error.targetSlotOccupied": "Target slot is already occupied",
+  "error.slotOutOfBounds": "Selected slot is out of container bounds",
   "inventory.equip": "Equip",
   "inventory.unequip": "Unequip",
   "inventory.equipment": "Equipment",

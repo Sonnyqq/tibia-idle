@@ -282,6 +282,7 @@
   "error.levelTooLow": "Poziom postaci jest zbyt niski, aby założyć ten przedmiot",
   "error.vocationIncompatible": "Ten przedmiot nie może być założony przez twoją profesję",
   "error.targetSlotOccupied": "Docelowy slot jest już zajęty",
+  "error.slotOutOfBounds": "Wybrany slot wykracza poza pojemność kontenera",
   "inventory.equip": "Załóż",
   "inventory.unequip": "Zdejmij",
   "inventory.equipment": "Ekwipunek",

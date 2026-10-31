@@ -82,6 +82,7 @@ export type MoveInventoryItemResult =
     }
   | { readonly status: 'ITEM_NOT_FOUND' }
   | { readonly status: 'INVENTORY_FULL' }
+  | { readonly status: 'SLOT_OUT_OF_BOUNDS' }
   | { readonly status: 'CAPACITY_EXCEEDED' }
   | { readonly status: 'IDEMPOTENCY_KEY_CONFLICT' }
   | { readonly status: 'FORBIDDEN' };
@@ -105,6 +106,7 @@ export type SplitInventoryStackResult =
   | { readonly status: 'INVALID_QUANTITY' }
   | { readonly status: 'STACK_INCOMPATIBLE' }
   | { readonly status: 'INVENTORY_FULL' }
+  | { readonly status: 'SLOT_OUT_OF_BOUNDS' }
   | { readonly status: 'IDEMPOTENCY_KEY_CONFLICT' }
   | { readonly status: 'FORBIDDEN' };
 
@@ -792,11 +794,11 @@ export async function moveInventoryItem(
       // Slot bounds check
       if (input.fromSlot < 0 || input.fromSlot >= container.slot_capacity) {
         await client.query('ROLLBACK');
-        return { status: 'ITEM_NOT_FOUND' };
+        return { status: 'SLOT_OUT_OF_BOUNDS' };
       }
       if (input.toSlot < 0 || input.toSlot >= container.slot_capacity) {
         await client.query('ROLLBACK');
-        return { status: 'INVENTORY_FULL' };
+        return { status: 'SLOT_OUT_OF_BOUNDS' };
       }
 
       if (input.fromSlot === input.toSlot) {
@@ -1032,11 +1034,11 @@ export async function splitInventoryStack(
       // Slot bounds check
       if (input.fromSlot < 0 || input.fromSlot >= container.slot_capacity) {
         await client.query('ROLLBACK');
-        return { status: 'ITEM_NOT_FOUND' };
+        return { status: 'SLOT_OUT_OF_BOUNDS' };
       }
       if (input.toSlot < 0 || input.toSlot >= container.slot_capacity) {
         await client.query('ROLLBACK');
-        return { status: 'INVENTORY_FULL' };
+        return { status: 'SLOT_OUT_OF_BOUNDS' };
       }
       if (input.fromSlot === input.toSlot) {
         await client.query('ROLLBACK');
@@ -1175,6 +1177,7 @@ export type EquipInventoryItemResult =
         | 'SLOT_MISMATCH'
         | 'LEVEL_TOO_LOW'
         | 'VOCATION_INCOMPATIBLE'
+        | 'SLOT_OUT_OF_BOUNDS'
         | 'IDEMPOTENCY_KEY_CONFLICT';
     };
 
@@ -1199,17 +1202,7 @@ export async function equipInventoryItem(
         return { status: 'CHARACTER_NOT_FOUND' };
       }
 
-      // 2. Active hunt safety: block equip during ACTIVE or STOP_CONTINUATION_REQUIRED
-      const activeHuntRes = await client.query<{ id: string }>(
-        `SELECT id FROM hunts WHERE character_id = $1 AND status IN ('ACTIVE', 'STOP_CONTINUATION_REQUIRED') LIMIT 1`,
-        [input.characterId]
-      );
-      if ((activeHuntRes.rowCount ?? 0) > 0) {
-        await client.query('ROLLBACK');
-        return { status: 'ACTIVE_HUNT_LOCKED' };
-      }
-
-      // 3. Idempotency check with canonical payload
+      // 2. Idempotency check with canonical payload
       const expectedPayload = JSON.stringify({
         backpackSlot: input.backpackSlot,
         equipmentSlot: input.equipmentSlot
@@ -1246,9 +1239,25 @@ export async function equipInventoryItem(
         };
       }
 
+      // 3. Active hunt safety: only block NEW equip operations during ACTIVE or STOP_CONTINUATION_REQUIRED
+      const activeHuntRes = await client.query<{ id: string }>(
+        `SELECT id FROM hunts WHERE character_id = $1 AND status IN ('ACTIVE', 'STOP_CONTINUATION_REQUIRED') LIMIT 1`,
+        [input.characterId]
+      );
+      if ((activeHuntRes.rowCount ?? 0) > 0) {
+        await client.query('ROLLBACK');
+        return { status: 'ACTIVE_HUNT_LOCKED' };
+      }
+
       // 4. Lock containers
       const backpack = await getOrCreateBackpackContainer(client, input.characterId, true);
       const equipment = await getOrCreateEquipmentContainer(client, input.characterId, true);
+
+      // Validate backpackSlot bounds against container slot_capacity
+      if (input.backpackSlot < 0 || input.backpackSlot >= backpack.slot_capacity) {
+        await client.query('ROLLBACK');
+        return { status: 'SLOT_OUT_OF_BOUNDS' };
+      }
 
       // 5. Lock source item in backpack
       const sourceItemRes = await client.query<InventoryInstanceDbRow>(
@@ -1390,6 +1399,7 @@ export type UnequipInventoryItemResult =
         | 'SLOT_EMPTY'
         | 'BACKPACK_FULL'
         | 'TARGET_SLOT_OCCUPIED'
+        | 'SLOT_OUT_OF_BOUNDS'
         | 'IDEMPOTENCY_KEY_CONFLICT';
     };
 
@@ -1414,17 +1424,7 @@ export async function unequipInventoryItem(
         return { status: 'CHARACTER_NOT_FOUND' };
       }
 
-      // 2. Active hunt safety
-      const activeHuntRes = await client.query<{ id: string }>(
-        `SELECT id FROM hunts WHERE character_id = $1 AND status IN ('ACTIVE', 'STOP_CONTINUATION_REQUIRED') LIMIT 1`,
-        [input.characterId]
-      );
-      if ((activeHuntRes.rowCount ?? 0) > 0) {
-        await client.query('ROLLBACK');
-        return { status: 'ACTIVE_HUNT_LOCKED' };
-      }
-
-      // 3. Idempotency check with canonical payload
+      // 2. Idempotency check with canonical payload
       const expectedPayload = JSON.stringify({
         equipmentSlot: input.equipmentSlot,
         targetBackpackSlot: input.targetBackpackSlot
@@ -1461,9 +1461,27 @@ export async function unequipInventoryItem(
         };
       }
 
+      // 3. Active hunt safety: only block NEW unequip operations during ACTIVE or STOP_CONTINUATION_REQUIRED
+      const activeHuntRes = await client.query<{ id: string }>(
+        `SELECT id FROM hunts WHERE character_id = $1 AND status IN ('ACTIVE', 'STOP_CONTINUATION_REQUIRED') LIMIT 1`,
+        [input.characterId]
+      );
+      if ((activeHuntRes.rowCount ?? 0) > 0) {
+        await client.query('ROLLBACK');
+        return { status: 'ACTIVE_HUNT_LOCKED' };
+      }
+
       // 4. Lock containers
       const backpack = await getOrCreateBackpackContainer(client, input.characterId, true);
       const equipment = await getOrCreateEquipmentContainer(client, input.characterId, true);
+
+      // Validate targetBackpackSlot bounds against container slot_capacity
+      if (input.targetBackpackSlot !== undefined) {
+        if (input.targetBackpackSlot < 0 || input.targetBackpackSlot >= backpack.slot_capacity) {
+          await client.query('ROLLBACK');
+          return { status: 'SLOT_OUT_OF_BOUNDS' };
+        }
+      }
 
       // 5. Lock item in equipment container
       const eqIndex = EQUIPMENT_SLOT_INDICES[input.equipmentSlot];

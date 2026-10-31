@@ -1106,6 +1106,9 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
     if (result.status === 'INVENTORY_FULL') {
       return sendApiError(reply, request, 400, 'INVENTORY_FULL', 'error.inventoryFull');
     }
+    if (result.status === 'SLOT_OUT_OF_BOUNDS') {
+      return sendApiError(reply, request, 400, 'SLOT_OUT_OF_BOUNDS', 'error.slotOutOfBounds');
+    }
     if (result.status === 'CAPACITY_EXCEEDED') {
       return sendApiError(reply, request, 400, 'CAPACITY_EXCEEDED', 'error.capacityExceeded');
     }
@@ -1184,6 +1187,9 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
     }
     if (result.status === 'INVENTORY_FULL') {
       return sendApiError(reply, request, 400, 'INVENTORY_FULL', 'error.inventoryFull');
+    }
+    if (result.status === 'SLOT_OUT_OF_BOUNDS') {
+      return sendApiError(reply, request, 400, 'SLOT_OUT_OF_BOUNDS', 'error.slotOutOfBounds');
     }
     if (result.status === 'FORBIDDEN') {
       return sendApiError(reply, request, 403, 'FORBIDDEN', 'error.forbidden');
@@ -1373,6 +1379,9 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
     if (result.status === 'SLOT_EMPTY') {
       return sendApiError(reply, request, 400, 'SLOT_EMPTY', 'error.slotEmpty');
     }
+    if (result.status === 'SLOT_OUT_OF_BOUNDS') {
+      return sendApiError(reply, request, 400, 'SLOT_OUT_OF_BOUNDS', 'error.slotOutOfBounds');
+    }
     if (result.status === 'NOT_EQUIPMENT') {
       return sendApiError(reply, request, 400, 'NOT_EQUIPMENT', 'error.notEquipment');
     }
@@ -1459,6 +1468,9 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
     }
     if (result.status === 'SLOT_EMPTY') {
       return sendApiError(reply, request, 400, 'SLOT_EMPTY', 'error.slotEmpty');
+    }
+    if (result.status === 'SLOT_OUT_OF_BOUNDS') {
+      return sendApiError(reply, request, 400, 'SLOT_OUT_OF_BOUNDS', 'error.slotOutOfBounds');
     }
     if (result.status === 'BACKPACK_FULL') {
       return sendApiError(reply, request, 400, 'BACKPACK_FULL', 'error.inventoryFull');
