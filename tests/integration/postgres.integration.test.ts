@@ -28,7 +28,9 @@ describe('PostgreSQL live database integration', () => {
         '0001_schema_migrations',
         '0002_auth_sessions_characters',
         '0003_persistent_offline_hunts',
-        '0004_persistent_inventory_backpack'
+        '0004_persistent_inventory_backpack',
+        '0005_equipment_paperdoll',
+        '0006_container_slot_bounds'
       ]);
 
       // 1. Test incremental upgrade on a database that already has existing characters from 0002
@@ -56,7 +58,9 @@ describe('PostgreSQL live database integration', () => {
       const step2Run = await applyMigrations(pool, migrations);
       expect(step2Run).toEqual([
         '0003_persistent_offline_hunts',
-        '0004_persistent_inventory_backpack'
+        '0004_persistent_inventory_backpack',
+        '0005_equipment_paperdoll',
+        '0006_container_slot_bounds'
       ]);
 
       // Verify existing character received one-time starter potion supplies, backfilled currency_ledger, and 20-slot backpack
@@ -86,16 +90,20 @@ describe('PostgreSQL live database integration', () => {
         balance_after: '100'
       });
 
-      const migratedBackpack = await pool.query<{
+      const migratedContainers = await pool.query<{
         container_type: string;
         slot_capacity: number;
-      }>('SELECT container_type, slot_capacity FROM inventory_containers WHERE character_id = $1', [
+      }>('SELECT container_type, slot_capacity FROM inventory_containers WHERE character_id = $1 ORDER BY container_type ASC', [
         preCharId
       ]);
-      expect(migratedBackpack.rows).toHaveLength(1);
-      expect(migratedBackpack.rows[0]).toEqual({
+      expect(migratedContainers.rows).toHaveLength(2);
+      expect(migratedContainers.rows[0]).toEqual({
         container_type: 'backpack',
         slot_capacity: 20
+      });
+      expect(migratedContainers.rows[1]).toEqual({
+        container_type: 'equipment',
+        slot_capacity: 9
       });
 
       // 2. Test clean migration from empty database + idempotent re-run
@@ -108,7 +116,9 @@ describe('PostgreSQL live database integration', () => {
         '0001_schema_migrations',
         '0002_auth_sessions_characters',
         '0003_persistent_offline_hunts',
-        '0004_persistent_inventory_backpack'
+        '0004_persistent_inventory_backpack',
+        '0005_equipment_paperdoll',
+        '0006_container_slot_bounds'
       ]);
 
       const secondRun = await applyMigrations(pool, migrations);
@@ -117,7 +127,7 @@ describe('PostgreSQL live database integration', () => {
       const ledgerRows = await pool.query<{ version: string; checksum: string }>(
         'SELECT version, checksum FROM schema_migrations ORDER BY version ASC'
       );
-      expect(ledgerRows.rows).toHaveLength(4);
+      expect(ledgerRows.rows).toHaveLength(6);
       expect(ledgerRows.rows[0]?.version).toBe('0001_schema_migrations');
       expect(ledgerRows.rows[0]?.checksum).toBe(migrations[0]?.checksum);
       expect(ledgerRows.rows[1]?.version).toBe('0002_auth_sessions_characters');
@@ -126,6 +136,10 @@ describe('PostgreSQL live database integration', () => {
       expect(ledgerRows.rows[2]?.checksum).toBe(migrations[2]?.checksum);
       expect(ledgerRows.rows[3]?.version).toBe('0004_persistent_inventory_backpack');
       expect(ledgerRows.rows[3]?.checksum).toBe(migrations[3]?.checksum);
+      expect(ledgerRows.rows[4]?.version).toBe('0005_equipment_paperdoll');
+      expect(ledgerRows.rows[4]?.checksum).toBe(migrations[4]?.checksum);
+      expect(ledgerRows.rows[5]?.version).toBe('0006_container_slot_bounds');
+      expect(ledgerRows.rows[5]?.checksum).toBe(migrations[5]?.checksum);
 
       const tamperedMigrations = [
         {

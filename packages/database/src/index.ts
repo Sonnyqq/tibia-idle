@@ -49,8 +49,13 @@ export {
   type ClaimHuntRewardInput,
   type ClaimHuntRewardResult,
   claimHuntReward,
+  type EquipInventoryItemInput,
+  type EquipInventoryItemResult,
+  equipInventoryItem,
   getCharacterContainers,
+  getCharacterEquipment,
   getCharacterInventory,
+  getOrCreateEquipmentContainer,
   type InventoryContainerDbRow,
   type InventoryInstanceDbRow,
   type MoveInventoryItemInput,
@@ -58,7 +63,10 @@ export {
   moveInventoryItem,
   type SplitInventoryStackInput,
   type SplitInventoryStackResult,
-  splitInventoryStack
+  splitInventoryStack,
+  type UnequipInventoryItemInput,
+  type UnequipInventoryItemResult,
+  unequipInventoryItem
 } from './inventory-repository.js';
 
 export interface DatabaseConfig {

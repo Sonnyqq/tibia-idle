@@ -2,11 +2,14 @@ import {
   type ActiveHuntDto,
   type ActiveHuntResponseDto,
   type CharacterDto,
+  type CharacterEquipmentResponseDto,
   type CharacterHuntRewardItemDto,
   type CharacterHuntRewardsResponseDto,
   type CharacterInventoryResponseDto,
   type ClaimHuntRewardResponseDto,
   EQUIPMENT_SLOTS,
+  type EquipmentSlot,
+  type EquipItemResponseDto,
   type HuntSegmentsResponseDto,
   type HuntStrategyDto,
   type MoveInventoryItemResponseDto,
@@ -15,6 +18,7 @@ import {
   type SplitInventoryStackResponseDto,
   type StartHuntResponseDto,
   type StopHuntResponseDto,
+  type UnequipItemResponseDto,
   type UserDto,
   VOCATIONS,
   type VocationDto,
@@ -119,7 +123,7 @@ const memoryPendingKeys = new Map<string, string>();
 
 export function getPendingHuntKey(
   characterId: string,
-  op: 'start' | 'settle' | 'stop' | 'claim' | 'move' | 'split',
+  op: 'start' | 'settle' | 'stop' | 'claim' | 'move' | 'split' | 'equip' | 'unequip',
   huntId?: string
 ): string | null {
   const storageKey = `tibia_idle_pending_op:${characterId}:${op}${huntId ? `:${huntId}` : ''}`;
@@ -135,7 +139,7 @@ export function getPendingHuntKey(
 
 export function setPendingHuntKey(
   characterId: string,
-  op: 'start' | 'settle' | 'stop' | 'claim' | 'move' | 'split',
+  op: 'start' | 'settle' | 'stop' | 'claim' | 'move' | 'split' | 'equip' | 'unequip',
   idempotencyKey: string,
   huntId?: string
 ): void {
@@ -152,7 +156,7 @@ export function setPendingHuntKey(
 
 export function clearPendingHuntKey(
   characterId: string,
-  op: 'start' | 'settle' | 'stop' | 'claim' | 'move' | 'split',
+  op: 'start' | 'settle' | 'stop' | 'claim' | 'move' | 'split' | 'equip' | 'unequip',
   huntId?: string
 ): void {
   const storageKey = `tibia_idle_pending_op:${characterId}:${op}${huntId ? `:${huntId}` : ''}`;
@@ -217,6 +221,7 @@ export function App({
   const [latestCompletedHuntId, setLatestCompletedHuntId] = useState<string | null>(null);
   const [rewardItems, setRewardItems] = useState<readonly CharacterHuntRewardItemDto[]>([]);
   const [inventory, setInventory] = useState<CharacterInventoryResponseDto | null>(null);
+  const [equipment, setEquipment] = useState<CharacterEquipmentResponseDto | null>(null);
   const [claimingRewardId, setClaimingRewardId] = useState<string | null>(null);
   const [inventoryActionLoading, setInventoryActionLoading] = useState<boolean>(false);
   const [dynamicLogEntries, setDynamicLogEntries] = useState<GameLogEntry[]>([]);
@@ -436,6 +441,8 @@ export function App({
       setZones([]);
       setActiveHunt(null);
       setRewardItems([]);
+      setInventory(null);
+      setEquipment(null);
       setHuntReport(null);
       setIsLoading(false);
     }
@@ -506,6 +513,26 @@ export function App({
     [apiBaseUrl]
   );
 
+  const fetchEquipment = useCallback(
+    async (charId: string) => {
+      try {
+        const res = await fetch(`${apiBaseUrl}/characters/${charId}/equipment`, {
+          method: 'GET',
+          credentials: 'include'
+        });
+        if (res.ok) {
+          const data = (await res.json()) as CharacterEquipmentResponseDto;
+          setEquipment(data);
+          return data;
+        }
+      } catch {
+        // Network error
+      }
+      return null;
+    },
+    [apiBaseUrl]
+  );
+
   const handleOpenLatestReport = useCallback(async () => {
     if (!latestCompletedHuntId) return;
     setHuntActionLoading(true);
@@ -531,23 +558,26 @@ export function App({
       setLatestCompletedHuntId(null);
       setRewardItems([]);
       setInventory(null);
+      setEquipment(null);
       return;
     }
     void fetchActiveHunt(activeCharacter.id);
     void fetchRewardItems(activeCharacter.id);
     void fetchInventory(activeCharacter.id);
-  }, [activeCharacter?.id, fetchActiveHunt, fetchRewardItems, fetchInventory]);
+    void fetchEquipment(activeCharacter.id);
+  }, [activeCharacter?.id, fetchActiveHunt, fetchRewardItems, fetchInventory, fetchEquipment]);
 
   useEffect(() => {
     if (!activeCharacter) return;
-    if (activeTab === 'inventory') {
+    if (activeTab === 'inventory' || activeTab === 'character') {
       void fetchInventory(activeCharacter.id);
       void fetchRewardItems(activeCharacter.id);
+      void fetchEquipment(activeCharacter.id);
     } else if (activeTab === 'hunts') {
       void fetchActiveHunt(activeCharacter.id);
       void fetchRewardItems(activeCharacter.id);
     }
-  }, [activeTab, activeCharacter?.id, fetchInventory, fetchRewardItems, fetchActiveHunt]);
+  }, [activeTab, activeCharacter?.id, fetchInventory, fetchRewardItems, fetchActiveHunt, fetchEquipment]);
 
   useEffect(() => {
     if (!activeCharacter) return;
@@ -954,6 +984,95 @@ export function App({
         const data = (await res.json()) as SplitInventoryStackResponseDto;
         clearPendingHuntKey(activeCharacter.id, 'split', opKey);
         setInventory(data.inventory);
+      } catch {
+        setErrorKey('common.error');
+      } finally {
+        setInventoryActionLoading(false);
+      }
+    },
+    [activeCharacter, csrfToken, inventoryActionLoading, apiBaseUrl]
+  );
+
+  const handleEquipItem = useCallback(
+    async (backpackSlot: number, equipmentSlot?: EquipmentSlot) => {
+      if (!activeCharacter || !csrfToken || inventoryActionLoading) return;
+      setInventoryActionLoading(true);
+      setErrorKey(null);
+
+      const opKey = `${backpackSlot}->${equipmentSlot ?? 'auto'}`;
+      const idempotencyKey =
+        getPendingHuntKey(activeCharacter.id, 'equip', opKey) || generateClientUUID();
+      setPendingHuntKey(activeCharacter.id, 'equip', idempotencyKey, opKey);
+
+      try {
+        const res = await fetch(`${apiBaseUrl}/characters/${activeCharacter.id}/equipment/equip`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-csrf-token': csrfToken
+          },
+          body: JSON.stringify({ backpackSlot, equipmentSlot, idempotencyKey })
+        });
+
+        if (!res.ok) {
+          const errBody = (await res.json().catch(() => null)) as {
+            error?: { messageKey?: string };
+          } | null;
+          setErrorKey((errBody?.error?.messageKey as TranslationKey) ?? 'common.error');
+          return;
+        }
+
+        const data = (await res.json()) as EquipItemResponseDto;
+        clearPendingHuntKey(activeCharacter.id, 'equip', opKey);
+        setInventory(data.inventory);
+        setEquipment(data.equipment);
+      } catch {
+        setErrorKey('common.error');
+      } finally {
+        setInventoryActionLoading(false);
+      }
+    },
+    [activeCharacter, csrfToken, inventoryActionLoading, apiBaseUrl]
+  );
+
+  const handleUnequipItem = useCallback(
+    async (equipmentSlot: EquipmentSlot, targetBackpackSlot?: number) => {
+      if (!activeCharacter || !csrfToken || inventoryActionLoading) return;
+      setInventoryActionLoading(true);
+      setErrorKey(null);
+
+      const opKey = `${equipmentSlot}->${targetBackpackSlot ?? 'auto'}`;
+      const idempotencyKey =
+        getPendingHuntKey(activeCharacter.id, 'unequip', opKey) || generateClientUUID();
+      setPendingHuntKey(activeCharacter.id, 'unequip', idempotencyKey, opKey);
+
+      try {
+        const res = await fetch(
+          `${apiBaseUrl}/characters/${activeCharacter.id}/equipment/unequip`,
+          {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-csrf-token': csrfToken
+            },
+            body: JSON.stringify({ equipmentSlot, targetBackpackSlot, idempotencyKey })
+          }
+        );
+
+        if (!res.ok) {
+          const errBody = (await res.json().catch(() => null)) as {
+            error?: { messageKey?: string };
+          } | null;
+          setErrorKey((errBody?.error?.messageKey as TranslationKey) ?? 'common.error');
+          return;
+        }
+
+        const data = (await res.json()) as UnequipItemResponseDto;
+        clearPendingHuntKey(activeCharacter.id, 'unequip', opKey);
+        setInventory(data.inventory);
+        setEquipment(data.equipment);
       } catch {
         setErrorKey('common.error');
       } finally {
@@ -1388,16 +1507,23 @@ export function App({
                   claimingRewardId={claimingRewardId}
                 />
               ) : activeTab === 'character' ? (
-                <CharacterView locale={locale} character={activeCharacter} />
+                <CharacterView
+                  locale={locale}
+                  character={activeCharacter}
+                  combatStats={equipment?.stats}
+                />
               ) : activeTab === 'inventory' ? (
                 <InventoryView
                   locale={locale}
                   inventory={inventory}
+                  equipment={equipment}
                   rewardItems={rewardItems}
                   onClaimReward={handleClaimReward}
                   claimingRewardId={claimingRewardId}
                   onMoveItem={handleMoveItem}
                   onSplitStack={handleSplitStack}
+                  onEquipItem={handleEquipItem}
+                  onUnequipItem={handleUnequipItem}
                   actionLoading={inventoryActionLoading}
                 />
               ) : activeTab === 'bestiary' ? (
@@ -1429,17 +1555,24 @@ export function App({
                 expandLabel={t(locale, 'window.expand')}
               >
                 <div className="dock-paperdoll-grid">
-                  {EQUIPMENT_SLOTS.map((slot) => (
-                    <ItemSlot
-                      key={slot}
-                      slotId={`dock-${slot}`}
-                      label={t(locale, EQUIPMENT_SLOT_KEY_MAP[slot])}
-                      iconKey={slot}
-                      category="equipment"
-                      state="empty"
-                      onSelect={() => navigateTab('inventory')}
-                    />
-                  ))}
+                  {EQUIPMENT_SLOTS.map((slot) => {
+                    const equipped = equipment?.slots[slot] ?? null;
+                    return (
+                      <ItemSlot
+                        key={slot}
+                        slotId={`dock-${slot}`}
+                        label={
+                          equipped
+                            ? t(locale, equipped.nameKey as TranslationKey)
+                            : t(locale, EQUIPMENT_SLOT_KEY_MAP[slot])
+                        }
+                        iconKey={equipped?.fallbackIconKey ?? slot}
+                        category="equipment"
+                        state={equipped ? 'occupied' : 'empty'}
+                        onSelect={() => navigateTab('inventory')}
+                      />
+                    );
+                  })}
                 </div>
               </GameWindow>
 

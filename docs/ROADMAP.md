@@ -35,7 +35,7 @@ All stages start **NOT STARTED**; a roadmap line is not evidence of code. No mer
 
 ## P04 — inventory and economy foundation
 - [x] Persistent inventory, 20-slot starting backpack, integer capacity/weight, item stacking, empty moves, slot swaps, stack splitting, AFK reward inbox atomic claim (`IDLE-005A`).
-- [ ] Equipped items (paperdoll equipment stats & weapon requirements P04B), loot filter, provenance.
+- [x] Equipped items (9-slot paperdoll equipment stats, weapon requirements, active hunt lock, stat diff tooltip, character sheet stats P04B / `IDLE-005B`).
 - [ ] Gold ledger, purchase/sell to NPC, atomic transactions; abuse/race tests.
 - [ ] 120 base items target reached incrementally; versioned loot tables.
 **Exit:** zero dupes in crash/race test harness, reconciled economy.

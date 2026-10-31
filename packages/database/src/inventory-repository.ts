@@ -1,16 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import {
+  type CharacterEquipmentResponseDto,
   type CharacterHuntRewardItemDto,
   type CharacterInventoryResponseDto,
+  type EquipmentSlotDto,
+  type EquippedItemSlotDto,
   type InventoryContainerDto,
   type InventorySlotItemDto,
   type ItemRarityDto,
   type VocationDto
 } from '@tibia-idle/contracts';
 import {
+  calculateCharacterCarriedWeight,
   calculateCharacterMaxCapacity,
+  calculateEffectiveCombatStats,
   calculateInventoryCapacity,
-  calculateInventoryWeight,
+  EQUIPMENT_INDEX_TO_SLOT,
+  EQUIPMENT_SLOT_INDICES,
   getItemDefinition
 } from '@tibia-idle/domain';
 import type pg from 'pg';
@@ -18,7 +24,7 @@ import type pg from 'pg';
 export interface InventoryContainerDbRow {
   id: string;
   character_id: string;
-  container_type: 'backpack';
+  container_type: 'backpack' | 'equipment';
   slot_capacity: number;
   row_version: number;
   created_at: Date;
@@ -76,6 +82,7 @@ export type MoveInventoryItemResult =
     }
   | { readonly status: 'ITEM_NOT_FOUND' }
   | { readonly status: 'INVENTORY_FULL' }
+  | { readonly status: 'SLOT_OUT_OF_BOUNDS' }
   | { readonly status: 'CAPACITY_EXCEEDED' }
   | { readonly status: 'IDEMPOTENCY_KEY_CONFLICT' }
   | { readonly status: 'FORBIDDEN' };
@@ -99,6 +106,7 @@ export type SplitInventoryStackResult =
   | { readonly status: 'INVALID_QUANTITY' }
   | { readonly status: 'STACK_INCOMPATIBLE' }
   | { readonly status: 'INVENTORY_FULL' }
+  | { readonly status: 'SLOT_OUT_OF_BOUNDS' }
   | { readonly status: 'IDEMPOTENCY_KEY_CONFLICT' }
   | { readonly status: 'FORBIDDEN' };
 
@@ -122,6 +130,10 @@ function mapSlotItemDto(row: InventoryInstanceDbRow): InventorySlotItemDto {
     weightUnits: def.weightUnits,
     totalWeight: def.weightUnits * row.quantity,
     quantity: row.quantity,
+    equipmentSlot: def.equipmentSlot,
+    requiredLevel: def.requiredLevel,
+    allowedVocations: def.allowedVocations ? [...def.allowedVocations] : undefined,
+    combatBonuses: def.combatBonuses,
     rowVersion: row.row_version
   };
 }
@@ -175,25 +187,68 @@ async function getOrCreateBackpackContainer(
   return row;
 }
 
+export async function getOrCreateEquipmentContainer(
+  client: pg.PoolClient | pg.Pool,
+  characterId: string,
+  forUpdate = false
+): Promise<InventoryContainerDbRow> {
+  const query = `SELECT * FROM inventory_containers WHERE character_id = $1 AND container_type = 'equipment' ${
+    forUpdate ? 'FOR UPDATE' : ''
+  } LIMIT 1`;
+  const selectRes = await client.query<InventoryContainerDbRow>(query, [characterId]);
+  if (selectRes.rows[0]) {
+    return selectRes.rows[0];
+  }
+
+  const insertRes = await client.query<InventoryContainerDbRow>(
+    `INSERT INTO inventory_containers (
+       id, character_id, container_type, slot_capacity, row_version, created_at
+     )
+     VALUES ($1, $2, 'equipment', 9, 1, NOW())
+     ON CONFLICT (character_id, container_type) DO UPDATE
+       SET row_version = inventory_containers.row_version
+     RETURNING *`,
+    [randomUUID(), characterId]
+  );
+  const row = insertRes.rows[0];
+  if (!row) {
+    throw new Error('Failed to create or retrieve equipment container');
+  }
+  return row;
+}
+
 export async function getCharacterContainers(
   pool: pg.Pool,
   characterId: string
 ): Promise<readonly InventoryContainerDto[]> {
-  const container = await getOrCreateBackpackContainer(pool, characterId);
-  const occupiedRes = await pool.query<{ count: string }>(
-    `SELECT count(*) FROM inventory_instances WHERE character_id = $1 AND container_id = $2`,
-    [characterId, container.id]
+  const backpack = await getOrCreateBackpackContainer(pool, characterId);
+  const equipment = await getOrCreateEquipmentContainer(pool, characterId);
+
+  const countsRes = await pool.query<{ container_id: string; count: string }>(
+    `SELECT container_id, count(*) FROM inventory_instances WHERE character_id = $1 GROUP BY container_id`,
+    [characterId]
   );
-  const occupiedSlots = Number(occupiedRes.rows[0]?.count ?? 0);
+  const countsMap = new Map<string, number>();
+  for (const row of countsRes.rows) {
+    countsMap.set(row.container_id, Number(row.count));
+  }
 
   return [
     {
-      id: container.id,
-      characterId: container.character_id,
+      id: backpack.id,
+      characterId: backpack.character_id,
       containerType: 'backpack',
-      slotCapacity: container.slot_capacity,
-      occupiedSlots,
-      rowVersion: container.row_version
+      slotCapacity: backpack.slot_capacity,
+      occupiedSlots: countsMap.get(backpack.id) ?? 0,
+      rowVersion: backpack.row_version
+    },
+    {
+      id: equipment.id,
+      characterId: equipment.character_id,
+      containerType: 'equipment',
+      slotCapacity: equipment.slot_capacity,
+      occupiedSlots: countsMap.get(equipment.id) ?? 0,
+      rowVersion: equipment.row_version
     }
   ];
 }
@@ -220,10 +275,20 @@ export async function getCharacterInventory(
   );
 
   const slots = itemsRes.rows.map(mapSlotItemDto);
+
+  const eqContainer = await getOrCreateEquipmentContainer(pool, characterId);
+  const eqItemsRes = await pool.query<{ item_id: string; quantity: number }>(
+    `SELECT item_id, quantity FROM inventory_instances
+     WHERE character_id = $1 AND container_id = $2`,
+    [characterId, eqContainer.id]
+  );
+  const equippedItems = eqItemsRes.rows.map((r) => ({ itemId: r.item_id, quantity: r.quantity }));
+
   const capacity = calculateInventoryCapacity(
     charRow.vocation,
     charRow.level,
     slots,
+    equippedItems,
     container.slot_capacity
   );
 
@@ -239,6 +304,91 @@ export async function getCharacterInventory(
     },
     slots,
     capacity
+  };
+}
+
+export async function getCharacterEquipment(
+  pool: pg.Pool | pg.PoolClient,
+  characterId: string
+): Promise<CharacterEquipmentResponseDto> {
+  const charRes = await pool.query<{ vocation: VocationDto; level: number }>(
+    `SELECT vocation, level FROM characters WHERE id = $1 LIMIT 1`,
+    [characterId]
+  );
+  const charRow = charRes.rows[0];
+  if (!charRow) {
+    throw new Error(`Character '${characterId}' not found`);
+  }
+
+  const activeHuntRes = await pool.query<{ id: string }>(
+    `SELECT id FROM hunts WHERE character_id = $1 AND status IN ('ACTIVE', 'STOP_CONTINUATION_REQUIRED') LIMIT 1`,
+    [characterId]
+  );
+  const activeHuntLocked = (activeHuntRes.rowCount ?? 0) > 0;
+
+  const container = await getOrCreateEquipmentContainer(pool, characterId);
+  const itemsRes = await pool.query<InventoryInstanceDbRow>(
+    `SELECT * FROM inventory_instances
+     WHERE character_id = $1 AND container_id = $2
+     ORDER BY slot_index ASC`,
+    [characterId, container.id]
+  );
+
+  const slotMap: Record<EquipmentSlotDto, EquippedItemSlotDto | null> = {
+    helmet: null,
+    amulet: null,
+    weapon: null,
+    armor: null,
+    shield: null,
+    ring: null,
+    legs: null,
+    boots: null,
+    ammunition: null
+  };
+
+  const equippedItemsList: { itemId: string; quantity: number }[] = [];
+  let totalEquipmentWeight = 0;
+
+  for (const row of itemsRes.rows) {
+    const slotName = EQUIPMENT_INDEX_TO_SLOT[row.slot_index];
+    if (!slotName) continue;
+    const def = getItemDefinition(row.item_id);
+    if (!def) continue;
+
+    const slotDto: EquippedItemSlotDto = {
+      slot: slotName,
+      instanceId: row.id,
+      itemId: row.item_id,
+      nameKey: def.nameKey,
+      rarity: def.rarity,
+      assetId: def.assetId,
+      fallbackIconKey: def.fallbackIconKey,
+      itemType: def.itemType,
+      stackable: def.stackable,
+      maxStackSize: def.maxStackSize,
+      weightUnits: def.weightUnits,
+      totalWeight: def.weightUnits * row.quantity,
+      quantity: row.quantity,
+      equipmentSlot: slotName,
+      requiredLevel: def.requiredLevel,
+      allowedVocations: def.allowedVocations ? [...def.allowedVocations] : undefined,
+      combatBonuses: def.combatBonuses,
+      rowVersion: row.row_version
+    };
+
+    slotMap[slotName] = slotDto;
+    equippedItemsList.push({ itemId: row.item_id, quantity: row.quantity });
+    totalEquipmentWeight += slotDto.totalWeight;
+  }
+
+  const stats = calculateEffectiveCombatStats(charRow, equippedItemsList);
+
+  return {
+    characterId,
+    slots: slotMap,
+    stats,
+    activeHuntLocked,
+    totalEquipmentWeight
   };
 }
 
@@ -378,10 +528,17 @@ export async function claimHuntReward(
       throw new RangeError(`Catalog item '${rewardRow.item_id}' not found in domain definitions`);
     }
 
-    // 5. Weight & capacity verification
+    // 5. Weight & capacity verification (including equipment)
+    const eqContainer = await getOrCreateEquipmentContainer(client, input.characterId);
+    const eqItemsRes = await client.query<{ item_id: string; quantity: number }>(
+      `SELECT item_id, quantity FROM inventory_instances
+       WHERE character_id = $1 AND container_id = $2`,
+      [input.characterId, eqContainer.id]
+    );
     const maxCapacity = calculateCharacterMaxCapacity(charRow.vocation, charRow.level);
-    const currentWeight = calculateInventoryWeight(
-      existingItems.map((i) => ({ itemId: i.item_id, quantity: i.quantity }))
+    const currentWeight = calculateCharacterCarriedWeight(
+      existingItems.map((i) => ({ itemId: i.item_id, quantity: i.quantity })),
+      eqItemsRes.rows.map((r) => ({ itemId: r.item_id, quantity: r.quantity }))
     );
     const addedWeight = itemDef.weightUnits * rewardRow.quantity;
 
@@ -637,11 +794,11 @@ export async function moveInventoryItem(
       // Slot bounds check
       if (input.fromSlot < 0 || input.fromSlot >= container.slot_capacity) {
         await client.query('ROLLBACK');
-        return { status: 'ITEM_NOT_FOUND' };
+        return { status: 'SLOT_OUT_OF_BOUNDS' };
       }
       if (input.toSlot < 0 || input.toSlot >= container.slot_capacity) {
         await client.query('ROLLBACK');
-        return { status: 'INVENTORY_FULL' };
+        return { status: 'SLOT_OUT_OF_BOUNDS' };
       }
 
       if (input.fromSlot === input.toSlot) {
@@ -877,11 +1034,11 @@ export async function splitInventoryStack(
       // Slot bounds check
       if (input.fromSlot < 0 || input.fromSlot >= container.slot_capacity) {
         await client.query('ROLLBACK');
-        return { status: 'ITEM_NOT_FOUND' };
+        return { status: 'SLOT_OUT_OF_BOUNDS' };
       }
       if (input.toSlot < 0 || input.toSlot >= container.slot_capacity) {
         await client.query('ROLLBACK');
-        return { status: 'INVENTORY_FULL' };
+        return { status: 'SLOT_OUT_OF_BOUNDS' };
       }
       if (input.fromSlot === input.toSlot) {
         await client.query('ROLLBACK');
@@ -979,6 +1136,432 @@ export async function splitInventoryStack(
       return {
         status: 'SUCCESS',
         inventory,
+        idempotentReplay: false
+      };
+    } catch (err) {
+      if (!committed) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Ignore
+        }
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
+  });
+}
+
+export interface EquipInventoryItemInput {
+  readonly characterId: string;
+  readonly backpackSlot: number;
+  readonly equipmentSlot: EquipmentSlotDto;
+  readonly idempotencyKey: string;
+}
+
+export type EquipInventoryItemResult =
+  | {
+      readonly status: 'SUCCESS';
+      readonly action: 'EQUIPPED' | 'SWAPPED';
+      readonly equipment: CharacterEquipmentResponseDto;
+      readonly inventory: CharacterInventoryResponseDto;
+      readonly idempotentReplay: boolean;
+    }
+  | {
+      readonly status:
+        | 'CHARACTER_NOT_FOUND'
+        | 'ACTIVE_HUNT_LOCKED'
+        | 'SLOT_EMPTY'
+        | 'NOT_EQUIPMENT'
+        | 'SLOT_MISMATCH'
+        | 'LEVEL_TOO_LOW'
+        | 'VOCATION_INCOMPATIBLE'
+        | 'SLOT_OUT_OF_BOUNDS'
+        | 'IDEMPOTENCY_KEY_CONFLICT';
+    };
+
+export async function equipInventoryItem(
+  pool: pg.Pool,
+  input: EquipInventoryItemInput
+): Promise<EquipInventoryItemResult> {
+  return withTransactionRetry(async () => {
+    const client = await pool.connect();
+    let committed = false;
+    try {
+      await client.query('BEGIN');
+
+      // 1. Lock character
+      const charRes = await client.query<{ id: string; vocation: VocationDto; level: number }>(
+        `SELECT id, vocation, level FROM characters WHERE id = $1 FOR UPDATE`,
+        [input.characterId]
+      );
+      const charRow = charRes.rows[0];
+      if (!charRow) {
+        await client.query('ROLLBACK');
+        return { status: 'CHARACTER_NOT_FOUND' };
+      }
+
+      // 2. Idempotency check with canonical payload
+      const expectedPayload = JSON.stringify({
+        backpackSlot: input.backpackSlot,
+        equipmentSlot: input.equipmentSlot
+      });
+
+      const movementRes = await client.query<{
+        id: string;
+        operation_type: 'EQUIP_ITEM' | 'SWAP_EQUIPMENT';
+        source_reference: string | null;
+      }>(
+        `SELECT id, operation_type, source_reference FROM inventory_movements
+         WHERE character_id = $1 AND operation_type IN ('EQUIP_ITEM', 'SWAP_EQUIPMENT') AND operation_key = $2`,
+        [input.characterId, input.idempotencyKey]
+      );
+
+      const existingMovement = movementRes.rows[0];
+      if (existingMovement) {
+        const payloadMatch = existingMovement.source_reference === expectedPayload;
+        if (!payloadMatch) {
+          await client.query('ROLLBACK');
+          return { status: 'IDEMPOTENCY_KEY_CONFLICT' };
+        }
+
+        await client.query('COMMIT');
+        committed = true;
+        const equipment = await getCharacterEquipment(client, input.characterId);
+        const inventory = await getCharacterInventory(client, input.characterId);
+        return {
+          status: 'SUCCESS',
+          action: existingMovement.operation_type === 'SWAP_EQUIPMENT' ? 'SWAPPED' : 'EQUIPPED',
+          equipment,
+          inventory,
+          idempotentReplay: true
+        };
+      }
+
+      // 3. Active hunt safety: only block NEW equip operations during ACTIVE or STOP_CONTINUATION_REQUIRED
+      const activeHuntRes = await client.query<{ id: string }>(
+        `SELECT id FROM hunts WHERE character_id = $1 AND status IN ('ACTIVE', 'STOP_CONTINUATION_REQUIRED') LIMIT 1`,
+        [input.characterId]
+      );
+      if ((activeHuntRes.rowCount ?? 0) > 0) {
+        await client.query('ROLLBACK');
+        return { status: 'ACTIVE_HUNT_LOCKED' };
+      }
+
+      // 4. Lock containers
+      const backpack = await getOrCreateBackpackContainer(client, input.characterId, true);
+      const equipment = await getOrCreateEquipmentContainer(client, input.characterId, true);
+
+      // Validate backpackSlot bounds against container slot_capacity
+      if (input.backpackSlot < 0 || input.backpackSlot >= backpack.slot_capacity) {
+        await client.query('ROLLBACK');
+        return { status: 'SLOT_OUT_OF_BOUNDS' };
+      }
+
+      // 5. Lock source item in backpack
+      const sourceItemRes = await client.query<InventoryInstanceDbRow>(
+        `SELECT * FROM inventory_instances
+         WHERE character_id = $1 AND container_id = $2 AND slot_index = $3
+         FOR UPDATE`,
+        [input.characterId, backpack.id, input.backpackSlot]
+      );
+      const sourceItem = sourceItemRes.rows[0];
+      if (!sourceItem) {
+        await client.query('ROLLBACK');
+        return { status: 'SLOT_EMPTY' };
+      }
+
+      const itemDef = getItemDefinition(sourceItem.item_id);
+      if (!itemDef || itemDef.itemType !== 'equipment') {
+        await client.query('ROLLBACK');
+        return { status: 'NOT_EQUIPMENT' };
+      }
+
+      if (itemDef.equipmentSlot !== input.equipmentSlot) {
+        await client.query('ROLLBACK');
+        return { status: 'SLOT_MISMATCH' };
+      }
+
+      const reqLevel = itemDef.requiredLevel ?? 1;
+      if (charRow.level < reqLevel) {
+        await client.query('ROLLBACK');
+        return { status: 'LEVEL_TOO_LOW' };
+      }
+
+      if (itemDef.allowedVocations && !itemDef.allowedVocations.includes(charRow.vocation)) {
+        await client.query('ROLLBACK');
+        return { status: 'VOCATION_INCOMPATIBLE' };
+      }
+
+      // 6. Lock target slot in equipment
+      const targetEqIndex = EQUIPMENT_SLOT_INDICES[input.equipmentSlot];
+      const targetItemRes = await client.query<InventoryInstanceDbRow>(
+        `SELECT * FROM inventory_instances
+         WHERE character_id = $1 AND container_id = $2 AND slot_index = $3
+         FOR UPDATE`,
+        [input.characterId, equipment.id, targetEqIndex]
+      );
+      const existingEqItem = targetItemRes.rows[0];
+
+      let action: 'EQUIPPED' | 'SWAPPED';
+
+      if (!existingEqItem) {
+        // Move instance from backpack to equipment
+        await client.query(
+          `UPDATE inventory_instances
+           SET container_id = $1, slot_index = $2, row_version = row_version + 1
+           WHERE id = $3`,
+          [equipment.id, targetEqIndex, sourceItem.id]
+        );
+
+        await client.query(
+          `INSERT INTO inventory_movements (
+             id, character_id, operation_type, operation_key, source_reference, item_id, quantity, created_at
+           )
+           VALUES ($1, $2, 'EQUIP_ITEM', $3, $4, $5, 1, NOW())`,
+          [randomUUID(), input.characterId, input.idempotencyKey, expectedPayload, sourceItem.item_id]
+        );
+        action = 'EQUIPPED';
+      } else {
+        // Swap: move existing item to backpackSlot, and source item to targetEqIndex
+        await client.query(
+          `UPDATE inventory_instances
+           SET container_id = $1, slot_index = $2, row_version = row_version + 1
+           WHERE id = $3`,
+          [backpack.id, input.backpackSlot, existingEqItem.id]
+        );
+
+        await client.query(
+          `UPDATE inventory_instances
+           SET container_id = $1, slot_index = $2, row_version = row_version + 1
+           WHERE id = $3`,
+          [equipment.id, targetEqIndex, sourceItem.id]
+        );
+
+        await client.query(
+          `INSERT INTO inventory_movements (
+             id, character_id, operation_type, operation_key, source_reference, item_id, quantity, created_at
+           )
+           VALUES ($1, $2, 'SWAP_EQUIPMENT', $3, $4, $5, 1, NOW())`,
+          [randomUUID(), input.characterId, input.idempotencyKey, expectedPayload, sourceItem.item_id]
+        );
+        action = 'SWAPPED';
+      }
+
+      await client.query('COMMIT');
+      committed = true;
+
+      const updatedEquipment = await getCharacterEquipment(client, input.characterId);
+      const updatedInventory = await getCharacterInventory(client, input.characterId);
+
+      return {
+        status: 'SUCCESS',
+        action,
+        equipment: updatedEquipment,
+        inventory: updatedInventory,
+        idempotentReplay: false
+      };
+    } catch (err) {
+      if (!committed) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Ignore
+        }
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
+  });
+}
+
+export interface UnequipInventoryItemInput {
+  readonly characterId: string;
+  readonly equipmentSlot: EquipmentSlotDto;
+  readonly targetBackpackSlot?: number | undefined;
+  readonly idempotencyKey: string;
+}
+
+export type UnequipInventoryItemResult =
+  | {
+      readonly status: 'SUCCESS';
+      readonly action: 'UNEQUIPPED';
+      readonly equipment: CharacterEquipmentResponseDto;
+      readonly inventory: CharacterInventoryResponseDto;
+      readonly idempotentReplay: boolean;
+    }
+  | {
+      readonly status:
+        | 'CHARACTER_NOT_FOUND'
+        | 'ACTIVE_HUNT_LOCKED'
+        | 'SLOT_EMPTY'
+        | 'BACKPACK_FULL'
+        | 'TARGET_SLOT_OCCUPIED'
+        | 'SLOT_OUT_OF_BOUNDS'
+        | 'IDEMPOTENCY_KEY_CONFLICT';
+    };
+
+export async function unequipInventoryItem(
+  pool: pg.Pool,
+  input: UnequipInventoryItemInput
+): Promise<UnequipInventoryItemResult> {
+  return withTransactionRetry(async () => {
+    const client = await pool.connect();
+    let committed = false;
+    try {
+      await client.query('BEGIN');
+
+      // 1. Lock character
+      const charRes = await client.query<{ id: string; vocation: VocationDto; level: number }>(
+        `SELECT id, vocation, level FROM characters WHERE id = $1 FOR UPDATE`,
+        [input.characterId]
+      );
+      const charRow = charRes.rows[0];
+      if (!charRow) {
+        await client.query('ROLLBACK');
+        return { status: 'CHARACTER_NOT_FOUND' };
+      }
+
+      // 2. Idempotency check with canonical payload
+      const expectedPayload = JSON.stringify({
+        equipmentSlot: input.equipmentSlot,
+        targetBackpackSlot: input.targetBackpackSlot
+      });
+
+      const movementRes = await client.query<{
+        id: string;
+        operation_type: 'UNEQUIP_ITEM';
+        source_reference: string | null;
+      }>(
+        `SELECT id, operation_type, source_reference FROM inventory_movements
+         WHERE character_id = $1 AND operation_type = 'UNEQUIP_ITEM' AND operation_key = $2`,
+        [input.characterId, input.idempotencyKey]
+      );
+
+      const existingMovement = movementRes.rows[0];
+      if (existingMovement) {
+        const payloadMatch = existingMovement.source_reference === expectedPayload;
+        if (!payloadMatch) {
+          await client.query('ROLLBACK');
+          return { status: 'IDEMPOTENCY_KEY_CONFLICT' };
+        }
+
+        await client.query('COMMIT');
+        committed = true;
+        const equipment = await getCharacterEquipment(client, input.characterId);
+        const inventory = await getCharacterInventory(client, input.characterId);
+        return {
+          status: 'SUCCESS',
+          action: 'UNEQUIPPED',
+          equipment,
+          inventory,
+          idempotentReplay: true
+        };
+      }
+
+      // 3. Active hunt safety: only block NEW unequip operations during ACTIVE or STOP_CONTINUATION_REQUIRED
+      const activeHuntRes = await client.query<{ id: string }>(
+        `SELECT id FROM hunts WHERE character_id = $1 AND status IN ('ACTIVE', 'STOP_CONTINUATION_REQUIRED') LIMIT 1`,
+        [input.characterId]
+      );
+      if ((activeHuntRes.rowCount ?? 0) > 0) {
+        await client.query('ROLLBACK');
+        return { status: 'ACTIVE_HUNT_LOCKED' };
+      }
+
+      // 4. Lock containers
+      const backpack = await getOrCreateBackpackContainer(client, input.characterId, true);
+      const equipment = await getOrCreateEquipmentContainer(client, input.characterId, true);
+
+      // Validate targetBackpackSlot bounds against container slot_capacity
+      if (input.targetBackpackSlot !== undefined) {
+        if (input.targetBackpackSlot < 0 || input.targetBackpackSlot >= backpack.slot_capacity) {
+          await client.query('ROLLBACK');
+          return { status: 'SLOT_OUT_OF_BOUNDS' };
+        }
+      }
+
+      // 5. Lock item in equipment container
+      const eqIndex = EQUIPMENT_SLOT_INDICES[input.equipmentSlot];
+      const eqItemRes = await client.query<InventoryInstanceDbRow>(
+        `SELECT * FROM inventory_instances
+         WHERE character_id = $1 AND container_id = $2 AND slot_index = $3
+         FOR UPDATE`,
+        [input.characterId, equipment.id, eqIndex]
+      );
+      const eqItem = eqItemRes.rows[0];
+      if (!eqItem) {
+        await client.query('ROLLBACK');
+        return { status: 'SLOT_EMPTY' };
+      }
+
+      // 6. Find target backpack slot
+      let targetSlot: number;
+      if (input.targetBackpackSlot !== undefined) {
+        const occupiedRes = await client.query<{ id: string }>(
+          `SELECT id FROM inventory_instances
+           WHERE character_id = $1 AND container_id = $2 AND slot_index = $3
+           FOR UPDATE`,
+          [input.characterId, backpack.id, input.targetBackpackSlot]
+        );
+        if (occupiedRes.rows[0]) {
+          await client.query('ROLLBACK');
+          return { status: 'TARGET_SLOT_OCCUPIED' };
+        }
+        targetSlot = input.targetBackpackSlot;
+      } else {
+        const occupiedSlotsRes = await client.query<{ slot_index: number }>(
+          `SELECT slot_index FROM inventory_instances
+           WHERE character_id = $1 AND container_id = $2
+           ORDER BY slot_index ASC
+           FOR UPDATE`,
+          [input.characterId, backpack.id]
+        );
+        const occupiedSet = new Set(occupiedSlotsRes.rows.map((r) => r.slot_index));
+        let freeSlot = -1;
+        for (let i = 0; i < backpack.slot_capacity; i++) {
+          if (!occupiedSet.has(i)) {
+            freeSlot = i;
+            break;
+          }
+        }
+        if (freeSlot === -1) {
+          await client.query('ROLLBACK');
+          return { status: 'BACKPACK_FULL' };
+        }
+        targetSlot = freeSlot;
+      }
+
+      // 7. Move instance from equipment to backpack
+      await client.query(
+        `UPDATE inventory_instances
+         SET container_id = $1, slot_index = $2, row_version = row_version + 1
+         WHERE id = $3`,
+        [backpack.id, targetSlot, eqItem.id]
+      );
+
+      // 8. Record movement
+      await client.query(
+        `INSERT INTO inventory_movements (
+           id, character_id, operation_type, operation_key, source_reference, item_id, quantity, created_at
+         )
+         VALUES ($1, $2, 'UNEQUIP_ITEM', $3, $4, $5, 1, NOW())`,
+        [randomUUID(), input.characterId, input.idempotencyKey, expectedPayload, eqItem.item_id]
+      );
+
+      await client.query('COMMIT');
+      committed = true;
+
+      const updatedEquipment = await getCharacterEquipment(client, input.characterId);
+      const updatedInventory = await getCharacterInventory(client, input.characterId);
+
+      return {
+        status: 'SUCCESS',
+        action: 'UNEQUIPPED',
+        equipment: updatedEquipment,
+        inventory: updatedInventory,
         idempotentReplay: false
       };
     } catch (err) {
