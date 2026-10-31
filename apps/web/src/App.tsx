@@ -25,7 +25,7 @@ import {
   t,
   type TranslationKey
 } from '@tibia-idle/i18n';
-import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { GameIcon } from './assets/assetRegistry.js';
 import { BestiaryView } from './components/BestiaryView.js';
 import { CharacterView } from './components/CharacterView.js';
@@ -111,6 +111,57 @@ function generateClientUUID(): string {
   });
 }
 
+const memoryPendingKeys = new Map<string, string>();
+
+export function getPendingHuntKey(
+  characterId: string,
+  op: 'start' | 'settle' | 'stop',
+  huntId?: string
+): string | null {
+  const storageKey = `tibia_idle_pending_op:${characterId}:${op}${huntId ? `:${huntId}` : ''}`;
+  if (typeof window !== 'undefined' && window.sessionStorage) {
+    try {
+      return window.sessionStorage.getItem(storageKey);
+    } catch {
+      // Fallback to memory
+    }
+  }
+  return memoryPendingKeys.get(storageKey) ?? null;
+}
+
+export function setPendingHuntKey(
+  characterId: string,
+  op: 'start' | 'settle' | 'stop',
+  idempotencyKey: string,
+  huntId?: string
+): void {
+  const storageKey = `tibia_idle_pending_op:${characterId}:${op}${huntId ? `:${huntId}` : ''}`;
+  if (typeof window !== 'undefined' && window.sessionStorage) {
+    try {
+      window.sessionStorage.setItem(storageKey, idempotencyKey);
+    } catch {
+      // Ignore storage quota
+    }
+  }
+  memoryPendingKeys.set(storageKey, idempotencyKey);
+}
+
+export function clearPendingHuntKey(
+  characterId: string,
+  op: 'start' | 'settle' | 'stop',
+  huntId?: string
+): void {
+  const storageKey = `tibia_idle_pending_op:${characterId}:${op}${huntId ? `:${huntId}` : ''}`;
+  if (typeof window !== 'undefined' && window.sessionStorage) {
+    try {
+      window.sessionStorage.removeItem(storageKey);
+    } catch {
+      // Ignore storage errors
+    }
+  }
+  memoryPendingKeys.delete(storageKey);
+}
+
 const MINI_BACKPACK_SLOTS = [1, 2, 3, 4, 5, 6, 7, 8] as const;
 
 export interface AppProps {
@@ -162,9 +213,6 @@ export function App({
   const [latestCompletedHuntId, setLatestCompletedHuntId] = useState<string | null>(null);
   const [rewardItems, setRewardItems] = useState<readonly CharacterHuntRewardItemDto[]>([]);
   const [dynamicLogEntries, setDynamicLogEntries] = useState<GameLogEntry[]>([]);
-
-  const pendingSettleKeyRef = useRef<string | null>(null);
-  const pendingStopKeyRef = useRef<string | null>(null);
 
   const activeCharacter = characters.find((c) => c.id === selectedCharacterId) ?? null;
 
@@ -398,6 +446,9 @@ export function App({
           const data = (await res.json()) as ActiveHuntResponseDto;
           setActiveHunt(data.hunt);
           setLatestCompletedHuntId(data.latestCompletedHuntId);
+          if (data.active && data.hunt) {
+            clearPendingHuntKey(charId, 'start');
+          }
           return data;
         }
       } catch {
@@ -474,10 +525,19 @@ export function App({
     hpPotions: number;
     mpPotions: number;
   }) => {
-    if (!activeCharacter || !csrfToken) return;
+    if (!activeCharacter || !csrfToken || huntActionLoading) return;
     setHuntActionLoading(true);
     setErrorKey(null);
     try {
+      if (activeHunt) {
+        setHuntActionLoading(false);
+        return;
+      }
+
+      const key =
+        getPendingHuntKey(activeCharacter.id, 'start') || generateClientUUID();
+      setPendingHuntKey(activeCharacter.id, 'start', key);
+
       const res = await fetch(`${apiBaseUrl}/hunts/start`, {
         method: 'POST',
         credentials: 'include',
@@ -491,11 +551,20 @@ export function App({
           strategy: params.strategy,
           hpPotions: params.hpPotions,
           mpPotions: params.mpPotions,
-          idempotencyKey: generateClientUUID()
+          idempotencyKey: key
         })
       });
 
       if (!res.ok) {
+        // Recovery check: if 409 conflict, check if hunt was actually created on server
+        if (res.status === 409) {
+          const activeCheck = await fetchActiveHunt(activeCharacter.id);
+          if (activeCheck?.active && activeCheck.hunt) {
+            clearPendingHuntKey(activeCharacter.id, 'start');
+            await fetchRewardItems(activeCharacter.id);
+            return;
+          }
+        }
         const errBody = (await res.json().catch(() => null)) as {
           error?: { messageKey?: string };
         } | null;
@@ -510,21 +579,37 @@ export function App({
       await fetchActiveHunt(activeCharacter.id);
       await fetchRewardItems(activeCharacter.id);
 
-      const nowTime = new Date().toLocaleTimeString(locale === 'pl' ? 'pl-PL' : 'en-US', {
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-      setDynamicLogEntries((prev) => [
-        ...prev,
-        {
-          id: `hunt-start-${Date.now()}`,
-          time: nowTime,
-          channel: 'hunt',
-          tone: 'info',
-          text: t(locale, 'hunt.logStarted')
-        }
-      ]);
+      // ONLY after successful response parsing and state application: clear pending start key
+      clearPendingHuntKey(activeCharacter.id, 'start');
+
+      if (!data.idempotentReplay) {
+        const nowTime = new Date().toLocaleTimeString(locale === 'pl' ? 'pl-PL' : 'en-US', {
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+        setDynamicLogEntries((prev) => [
+          ...prev,
+          {
+            id: `hunt-start-${Date.now()}`,
+            time: nowTime,
+            channel: 'hunt',
+            tone: 'info',
+            text: t(locale, 'hunt.logStarted')
+          }
+        ]);
+      }
     } catch {
+      // Network drop recovery: probe server before displaying error
+      try {
+        const activeCheck = await fetchActiveHunt(activeCharacter.id);
+        if (activeCheck?.active && activeCheck.hunt) {
+          clearPendingHuntKey(activeCharacter.id, 'start');
+          await fetchRewardItems(activeCharacter.id);
+          return;
+        }
+      } catch {
+        // Server unreachable
+      }
       setErrorKey('common.error');
     } finally {
       setHuntActionLoading(false);
@@ -532,12 +617,13 @@ export function App({
   };
 
   const handleSettleHunt = async () => {
-    if (!activeHunt || !csrfToken || !activeCharacter) return;
+    if (!activeHunt || !csrfToken || !activeCharacter || huntActionLoading) return;
     setHuntActionLoading(true);
     setErrorKey(null);
     try {
-      const key = pendingSettleKeyRef.current || generateClientUUID();
-      pendingSettleKeyRef.current = key;
+      const key =
+        getPendingHuntKey(activeCharacter.id, 'settle', activeHunt.huntId) || generateClientUUID();
+      setPendingHuntKey(activeCharacter.id, 'settle', key, activeHunt.huntId);
 
       const res = await fetch(`${apiBaseUrl}/hunts/${activeHunt.huntId}/settle`, {
         method: 'POST',
@@ -559,9 +645,6 @@ export function App({
         return;
       }
 
-      // Settled successfully — clear pending idempotency key
-      pendingSettleKeyRef.current = null;
-
       const data = (await res.json()) as SettleHuntResponseDto;
       setCharacters((prev) =>
         prev.map((c) => (c.id === data.character.id ? data.character : c))
@@ -569,13 +652,11 @@ export function App({
       await fetchActiveHunt(activeCharacter.id);
       await fetchRewardItems(activeCharacter.id);
 
-      // Only log if real rewards were gained to avoid duplicate entries on zero-delta replay
-      if (
-        !data.idempotentReplay ||
-        data.rewards.deltaXpGained > 0 ||
-        data.rewards.deltaGoldGained > 0 ||
-        data.rewards.deltaKills > 0
-      ) {
+      // ONLY after successful response parsing and state application: clear the pending key!
+      clearPendingHuntKey(activeCharacter.id, 'settle', activeHunt.huntId);
+
+      // Idempotent replay NEVER adds duplicate rewards log entries
+      if (!data.idempotentReplay) {
         const nowTime = new Date().toLocaleTimeString(locale === 'pl' ? 'pl-PL' : 'en-US', {
           hour: '2-digit',
           minute: '2-digit'
@@ -583,7 +664,7 @@ export function App({
         setDynamicLogEntries((prev) => [
           ...prev,
           {
-            id: `hunt-settle-${Date.now()}`,
+            id: `hunt-settle-${data.segmentId ?? Date.now()}`,
             time: nowTime,
             channel: 'hunt',
             tone: 'info',
@@ -599,13 +680,14 @@ export function App({
   };
 
   const handleStopHunt = async () => {
-    if (!activeHunt || !csrfToken || !activeCharacter) return;
+    if (!activeHunt || !csrfToken || !activeCharacter || huntActionLoading) return;
     setHuntActionLoading(true);
     setErrorKey(null);
     try {
       const huntId = activeHunt.huntId;
-      const key = pendingStopKeyRef.current || generateClientUUID();
-      pendingStopKeyRef.current = key;
+      const key =
+        getPendingHuntKey(activeCharacter.id, 'stop', huntId) || generateClientUUID();
+      setPendingHuntKey(activeCharacter.id, 'stop', key, huntId);
 
       const res = await fetch(`${apiBaseUrl}/hunts/${huntId}/stop`, {
         method: 'POST',
@@ -627,13 +709,13 @@ export function App({
         return;
       }
 
-      // Processed response from server — clear pending idempotency key
-      pendingStopKeyRef.current = null;
-
       const data = (await res.json()) as StopHuntResponseDto;
       setCharacters((prev) =>
         prev.map((c) => (c.id === data.character.id ? data.character : c))
       );
+
+      // ONLY after successful response parsing: clear pending key for this stop step
+      clearPendingHuntKey(activeCharacter.id, 'stop', huntId);
 
       if (data.status === 'STOP_CONTINUATION_REQUIRED' || data.continuationRequired) {
         // P0: Do NOT clear active hunt; do NOT open completed report; show stopping in progress
@@ -671,20 +753,22 @@ export function App({
 
       await fetchRewardItems(activeCharacter.id);
 
-      const nowTime = new Date().toLocaleTimeString(locale === 'pl' ? 'pl-PL' : 'en-US', {
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-      setDynamicLogEntries((prev) => [
-        ...prev,
-        {
-          id: `hunt-stop-${Date.now()}`,
-          time: nowTime,
-          channel: 'hunt',
-          tone: 'info',
-          text: t(locale, 'hunt.logCompleted')
-        }
-      ]);
+      if (!data.alreadyCompleted) {
+        const nowTime = new Date().toLocaleTimeString(locale === 'pl' ? 'pl-PL' : 'en-US', {
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+        setDynamicLogEntries((prev) => [
+          ...prev,
+          {
+            id: `hunt-stop-${Date.now()}`,
+            time: nowTime,
+            channel: 'hunt',
+            tone: 'info',
+            text: t(locale, 'hunt.logCompleted')
+          }
+        ]);
+      }
     } catch {
       setErrorKey('common.error');
     } finally {

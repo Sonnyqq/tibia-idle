@@ -18,6 +18,7 @@ import {
   applyMigrations,
   createDatabasePool,
   loadMigrationsFromDir,
+  reconcileCharacterEconomy,
   resolveTestDatabaseConfig
 } from '@tibia-idle/database';
 import { createFixedClock, DEFAULT_COMBAT_SIMULATION_CONFIG } from '@tibia-idle/domain';
@@ -814,6 +815,160 @@ describe('Hunts API Integration, Security, Knight Gate & Idempotency', () => {
       } finally {
         await resumeServer.close();
       }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('recovers from dropped start and settle responses without creating duplicate hunts or segments in PostgreSQL', async () => {
+    let currentTime = 1_700_000_000_000;
+    const server = buildApiServer({
+      dbPool: pool,
+      clock: {
+        nowMs: () => currentTime,
+        nowIso: () => new Date(currentTime).toISOString()
+      }
+    });
+    const baseUrl = await server.listen({ host: '127.0.0.1', port: 0 });
+
+    try {
+      // 1. Register & login
+      const regRes = await fetch(`${baseUrl}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'retry-cleanup@example.com',
+          password: 'Password123!',
+          locale: 'en'
+        })
+      });
+      const cookieHeader = extractCookieToken(regRes.headers.get('set-cookie'));
+      const meRes = await fetch(`${baseUrl}/me`, {
+        headers: { Cookie: `${SESSION_COOKIE_NAME}=${cookieHeader}` }
+      });
+      const meJson = SessionMeResponseSchema.parse(await meRes.json());
+      const csrf = meJson.csrfToken;
+      const authHeaders = {
+        'Content-Type': 'application/json',
+        Cookie: `${SESSION_COOKIE_NAME}=${cookieHeader}`,
+        'x-csrf-token': csrf
+      };
+
+      // 2. Create Knight
+      const charRes = await fetch(`${baseUrl}/characters`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ name: 'RetryKnight', vocation: 'knight' })
+      });
+      const knight = CharacterDtoSchema.parse(await charRes.json());
+
+      // 3. Start Hunt: Simulate request committed in PostgreSQL, but response dropped
+      const startRes1 = await fetch(`${baseUrl}/hunts/start`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          characterId: knight.id,
+          zoneId: 'damp-catacombs',
+          strategy: 'safe',
+          hpPotions: 20,
+          mpPotions: 10,
+          idempotencyKey: 'dropped-start-key'
+        })
+      });
+      expect(startRes1.status).toBe(201);
+      const startJson1 = StartHuntResponseSchema.parse(await startRes1.json());
+      const huntId = startJson1.hunt.huntId;
+
+      // Verify active hunt is discovered via GET /hunts/active
+      const activeCheck = await fetch(`${baseUrl}/hunts/active?characterId=${knight.id}`, {
+        headers: authHeaders
+      });
+      const activeJson = ActiveHuntResponseSchema.parse(await activeCheck.json());
+      expect(activeJson.active).toBe(true);
+      expect(activeJson.hunt?.huntId).toBe(huntId);
+
+      // Client retries POST /hunts/start with SAME idempotency key -> returns 200 idempotent replay
+      const retryStartRes = await fetch(`${baseUrl}/hunts/start`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          characterId: knight.id,
+          zoneId: 'damp-catacombs',
+          strategy: 'safe',
+          hpPotions: 20,
+          mpPotions: 10,
+          idempotencyKey: 'dropped-start-key'
+        })
+      });
+      expect(retryStartRes.status).toBe(200);
+      const retryStartJson = StartHuntResponseSchema.parse(await retryStartRes.json());
+      expect(retryStartJson.idempotentReplay).toBe(true);
+      expect(retryStartJson.hunt.huntId).toBe(huntId);
+
+      // Verify DB: exactly 1 hunt created
+      const huntCountRes = await pool.query<{ count: string }>(
+        'SELECT count(*) FROM hunts WHERE character_id = $1',
+        [knight.id]
+      );
+      expect(Number(huntCountRes.rows[0]?.count)).toBe(1);
+
+      // 4. Advance time by 60s and Settle
+      currentTime += 60_000;
+      const settleRes1 = await fetch(`${baseUrl}/hunts/${huntId}/settle`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ idempotencyKey: 'dropped-settle-key' })
+      });
+      expect(settleRes1.status).toBe(200);
+      const settleJson1 = SettleHuntResponseSchema.parse(await settleRes1.json());
+      expect(settleJson1.idempotentReplay).toBe(false);
+      expect(settleJson1.rewards.deltaXpGained).toBeGreaterThan(0);
+
+      // Client retries settle with SAME key immediately (0ms elapsed, simulate network retry)
+      const retrySettleRes = await fetch(`${baseUrl}/hunts/${huntId}/settle`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ idempotencyKey: 'dropped-settle-key' })
+      });
+      expect(retrySettleRes.status).toBe(200);
+      const retrySettleJson = SettleHuntResponseSchema.parse(await retrySettleRes.json());
+      expect(retrySettleJson.idempotentReplay).toBe(true);
+      expect(retrySettleJson.segmentId).toBe(settleJson1.segmentId);
+      expect(retrySettleJson.rewards.deltaXpGained).toBe(settleJson1.rewards.deltaXpGained);
+
+      // Verify DB: exactly 1 segment created
+      const segCountRes = await pool.query<{ count: string }>(
+        'SELECT count(*) FROM hunt_segments WHERE hunt_id = $1',
+        [huntId]
+      );
+      expect(Number(segCountRes.rows[0]?.count)).toBe(1);
+
+      // 5. Stop hunt with idempotency key
+      currentTime += 10_000;
+      const stopRes1 = await fetch(`${baseUrl}/hunts/${huntId}/stop`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ idempotencyKey: 'dropped-stop-key' })
+      });
+      expect(stopRes1.status).toBe(200);
+      const stopJson1 = StopHuntResponseSchema.parse(await stopRes1.json());
+      expect(stopJson1.status).toBe('COMPLETED');
+
+      // Retry stop with SAME key -> returns 200 alreadyCompleted: true
+      const retryStopRes = await fetch(`${baseUrl}/hunts/${huntId}/stop`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ idempotencyKey: 'dropped-stop-key' })
+      });
+      expect(retryStopRes.status).toBe(200);
+      const retryStopJson = StopHuntResponseSchema.parse(await retryStopRes.json());
+      expect(retryStopJson.alreadyCompleted).toBe(true);
+
+      // Reconcile economy: zero negative balances, zero double rewards
+      const reconciled = await reconcileCharacterEconomy(pool, knight.id);
+      expect(reconciled.isGoldReconciled).toBe(true);
+      expect(reconciled.isLootReconciled).toBe(true);
+      expect(reconciled.isXpLevelReconciled).toBe(true);
     } finally {
       await server.close();
     }
