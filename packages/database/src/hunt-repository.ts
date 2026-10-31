@@ -244,6 +244,21 @@ export interface ReconcileCharacterEconomyReport {
   readonly characterLevel: number;
   readonly expectedLevel: number;
   readonly isXpLevelReconciled: boolean;
+  readonly totalNpcPurchasesGold: number;
+  readonly totalNpcSalesGold: number;
+  readonly totalHpPotionsPurchased: number;
+  readonly totalMpPotionsPurchased: number;
+  readonly totalItemsSoldByCode: Readonly<Record<string, number>>;
+  readonly totalCurrentItemsByCode: Readonly<Record<string, number>>;
+  readonly characterHpPotions: number;
+  readonly characterMpPotions: number;
+  readonly totalHpPotionsConsumed: number;
+  readonly totalMpPotionsConsumed: number;
+  readonly unusedReservedHpPotions: number;
+  readonly unusedReservedMpPotions: number;
+  readonly expectedHpPotions: number;
+  readonly expectedMpPotions: number;
+  readonly isPotionsReconciled: boolean;
 }
 
 interface CharacterDbRow {
@@ -1708,7 +1723,7 @@ export async function reconcileCharacterEconomy(
     `SELECT amount, balance_after
      FROM currency_ledger
      WHERE character_id = $1
-     ORDER BY created_at ASC, balance_after ASC, id ASC`,
+     ORDER BY sequence_id ASC`,
     [characterId]
   );
 
@@ -1803,11 +1818,110 @@ export async function reconcileCharacterEconomy(
     characterGold === ledgerGoldSum &&
     (ledgerRes.rows.length === 0 ? characterGold === 0 : characterGold === latestLedgerBalanceAfter);
 
+  // NPC Purchases and Sales
+  const npcTxRes = await pool.query<{
+    operation_type: 'BUY' | 'SELL';
+    product_id: string;
+    total_qty: string | number;
+    total_gold: string | number;
+  }>(
+    `SELECT operation_type, product_id, SUM(quantity) AS total_qty, SUM(total_gold) AS total_gold
+     FROM npc_transactions
+     WHERE character_id = $1
+     GROUP BY operation_type, product_id`,
+    [characterId]
+  );
+
+  let totalNpcPurchasesGold = 0;
+  let totalNpcSalesGold = 0;
+  let totalHpPotionsPurchased = 0;
+  let totalMpPotionsPurchased = 0;
+  const totalItemsSoldByCode: Record<string, number> = {};
+
+  for (const row of npcTxRes.rows) {
+    if (row.operation_type === 'BUY') {
+      totalNpcPurchasesGold += Number(row.total_gold);
+      if (row.product_id === 'health-potion') {
+        totalHpPotionsPurchased += Number(row.total_qty);
+      } else if (row.product_id === 'mana-potion') {
+        totalMpPotionsPurchased += Number(row.total_qty);
+      }
+    } else if (row.operation_type === 'SELL') {
+      totalNpcSalesGold += Number(row.total_gold);
+      totalItemsSoldByCode[row.product_id] = (totalItemsSoldByCode[row.product_id] ?? 0) + Number(row.total_qty);
+    }
+  }
+
+  // Current items in backpack and equipment
+  const currentItemsRes = await pool.query<{ item_id: string; total_qty: string | number }>(
+    `SELECT item_id, SUM(quantity) AS total_qty
+     FROM inventory_instances
+     WHERE character_id = $1
+     GROUP BY item_id`,
+    [characterId]
+  );
+  const totalCurrentItemsByCode: Record<string, number> = {};
+  for (const row of currentItemsRes.rows) {
+    totalCurrentItemsByCode[row.item_id] = Number(row.total_qty);
+  }
+
+  // Hunt potion consumption across all committed segments
+  let totalHpPotionsConsumed = 0;
+  let totalMpPotionsConsumed = 0;
+  for (const seg of segmentsRes.rows) {
+    totalHpPotionsConsumed += Number(seg.rewards.deltaHpPotionsUsed ?? 0);
+    totalMpPotionsConsumed += Number(seg.rewards.deltaMpPotionsUsed ?? 0);
+  }
+
+  // Active / continuation hunts: calculate currently unused reserved potions
+  const activeHuntsRes = await pool.query<{
+    id: string;
+    reserved_hp_potions: string | number;
+    reserved_mp_potions: string | number;
+  }>(
+    `SELECT id, reserved_hp_potions, reserved_mp_potions
+     FROM hunts
+     WHERE character_id = $1 AND status IN ('ACTIVE', 'STOP_CONTINUATION_REQUIRED') AND potions_returned = FALSE`,
+    [characterId]
+  );
+
+  let unusedReservedHp = 0;
+  let unusedReservedMp = 0;
+  for (const hunt of activeHuntsRes.rows) {
+    const segRes = await pool.query<{
+      used_hp: string | number;
+      used_mp: string | number;
+    }>(
+      `SELECT
+         COALESCE(SUM((rewards->>'deltaHpPotionsUsed')::int), 0) AS used_hp,
+         COALESCE(SUM((rewards->>'deltaMpPotionsUsed')::int), 0) AS used_mp
+       FROM hunt_segments
+       WHERE hunt_id = $1`,
+      [hunt.id]
+    );
+    const usedHp = Number(segRes.rows[0]?.used_hp ?? 0);
+    const usedMp = Number(segRes.rows[0]?.used_mp ?? 0);
+    unusedReservedHp += Math.max(0, Number(hunt.reserved_hp_potions) - usedHp);
+    unusedReservedMp += Math.max(0, Number(hunt.reserved_mp_potions) - usedMp);
+  }
+
+  const initialHpPotions = 250;
+  const initialMpPotions = 150;
+  const expectedHpPotions = initialHpPotions + totalHpPotionsPurchased - totalHpPotionsConsumed;
+  const actualHpPotions = Number(charRow.hp_potions) + unusedReservedHp;
+  const expectedMpPotions = initialMpPotions + totalMpPotionsPurchased - totalMpPotionsConsumed;
+  const actualMpPotions = Number(charRow.mp_potions) + unusedReservedMp;
+
+  const isPotionsReconciled =
+    expectedHpPotions === actualHpPotions && expectedMpPotions === actualMpPotions;
+
   const allItemCodes = new Set([
     ...Object.keys(totalUnclaimedItemsByCode),
     ...Object.keys(totalClaimedItemsByCode),
     ...Object.keys(totalSettledItemsByCode),
-    ...Object.keys(totalMovementClaimedItemsByCode)
+    ...Object.keys(totalMovementClaimedItemsByCode),
+    ...Object.keys(totalItemsSoldByCode),
+    ...Object.keys(totalCurrentItemsByCode)
   ]);
   let isLootReconciled = true;
   for (const code of allItemCodes) {
@@ -1815,12 +1929,18 @@ export async function reconcileCharacterEconomy(
     const claimed = totalClaimedItemsByCode[code] ?? 0;
     const settled = totalSettledItemsByCode[code] ?? 0;
     const movementClaimed = totalMovementClaimedItemsByCode[code] ?? 0;
+    const sold = totalItemsSoldByCode[code] ?? 0;
+    const current = totalCurrentItemsByCode[code] ?? 0;
 
     if (settled !== unclaimed + claimed) {
       isLootReconciled = false;
       break;
     }
     if (claimed !== movementClaimed) {
+      isLootReconciled = false;
+      break;
+    }
+    if (claimed - sold !== current) {
       isLootReconciled = false;
       break;
     }
@@ -1844,7 +1964,22 @@ export async function reconcileCharacterEconomy(
     characterXp,
     characterLevel,
     expectedLevel,
-    isXpLevelReconciled
+    isXpLevelReconciled,
+    totalNpcPurchasesGold,
+    totalNpcSalesGold,
+    totalHpPotionsPurchased,
+    totalMpPotionsPurchased,
+    totalItemsSoldByCode,
+    totalCurrentItemsByCode,
+    characterHpPotions: Number(charRow.hp_potions),
+    characterMpPotions: Number(charRow.mp_potions),
+    totalHpPotionsConsumed,
+    totalMpPotionsConsumed,
+    unusedReservedHpPotions: unusedReservedHp,
+    unusedReservedMpPotions: unusedReservedMp,
+    expectedHpPotions,
+    expectedMpPotions,
+    isPotionsReconciled
   };
 }
 

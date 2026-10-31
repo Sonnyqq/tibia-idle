@@ -68,6 +68,14 @@ export {
   type UnequipInventoryItemResult,
   unequipInventoryItem
 } from './inventory-repository.js';
+export {
+  type BuyNpcProductInput,
+  buyNpcProduct,
+  getNpcTransactionsForCharacter,
+  NpcShopError,
+  type SellNpcItemInput,
+  sellNpcInventoryItem
+} from './npc-shop-repository.js';
 
 export interface DatabaseConfig {
   connectionString: string;

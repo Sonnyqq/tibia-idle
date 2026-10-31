@@ -1823,3 +1823,289 @@ body {
     width: 56px;
   }
 }
+
+/* ======================================================== */
+/* NPC Shop View (IDLE-005C)                                */
+/* ======================================================== */
+
+.game-shop-view {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.game-shop-balance-badge {
+  background: var(--game-inset);
+  border: 1px solid var(--game-border-dark);
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-heading);
+}
+
+.game-shop-merchant-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--game-inset);
+  border: 1px solid var(--game-border-dark);
+  padding: 10px;
+  margin-bottom: 8px;
+}
+
+.game-shop-merchant-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  background: var(--game-panel-dark);
+  border: 1px solid var(--game-border);
+}
+
+.game-shop-merchant-details {
+  flex: 1;
+}
+
+.game-shop-merchant-name {
+  margin: 0 0 2px 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-heading);
+}
+
+.game-shop-merchant-greeting {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.shop-hunt-warning {
+  margin-bottom: 8px;
+}
+
+.game-shop-tab-content {
+  padding-top: 8px;
+}
+
+.game-shop-offers-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 8px;
+}
+
+.game-shop-card {
+  background: var(--game-panel-dark);
+  border: 1px solid var(--game-border);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.game-shop-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.game-shop-item-icon {
+  width: 36px;
+  height: 36px;
+  background: var(--slot-background);
+  border: 1px solid var(--slot-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.game-shop-card-info {
+  flex: 1;
+}
+
+.game-shop-card-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.game-shop-stock {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.game-shop-unit-price {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-heading);
+}
+
+.game-shop-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--game-inset);
+  border: 1px solid var(--game-border-dark);
+  padding: 6px;
+}
+
+.game-shop-qty-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.game-shop-qty-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.game-shop-qty-input {
+  width: 60px;
+  background: var(--game-panel-dark);
+  border: 1px solid var(--game-border);
+  color: var(--text-primary);
+  padding: 3px 6px;
+  font-size: 12px;
+  text-align: right;
+}
+
+.game-shop-quick-btns {
+  display: flex;
+  gap: 4px;
+}
+
+.game-shop-summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.game-shop-total-label {
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.game-shop-total-label strong {
+  color: var(--text-heading);
+}
+
+.game-shop-sell-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.game-shop-sell-card {
+  background: var(--game-panel-dark);
+  border: 1px solid var(--game-border);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.game-shop-sell-item-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.game-shop-sell-item-info {
+  flex: 1;
+}
+
+.game-shop-sell-item-name {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.game-shop-sell-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--game-inset);
+  border: 1px solid var(--game-border-dark);
+  padding: 6px;
+}
+
+.game-shop-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+  color: var(--text-muted);
+  gap: 8px;
+  text-align: center;
+}
+
+.game-shop-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.game-shop-history-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--game-panel-dark);
+  border: 1px solid var(--game-border);
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.game-shop-badge {
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  border-radius: 2px;
+}
+
+.game-shop-badge.is-buy {
+  background: #3e3321;
+  color: var(--text-heading);
+  border: 1px solid #735930;
+}
+
+.game-shop-badge.is-sell {
+  background: #1c3623;
+  color: #79d68a;
+  border: 1px solid #356e43;
+}
+
+.game-shop-history-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.game-shop-history-product {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.game-shop-history-date {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.game-shop-history-amount {
+  font-weight: 700;
+}
+
+.game-shop-history-amount.is-debit {
+  color: #d67979;
+}
+
+.game-shop-history-amount.is-credit {
+  color: #79d68a;
+}

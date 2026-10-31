@@ -1,6 +1,7 @@
 import {
   type ActiveHuntDto,
   type ActiveHuntResponseDto,
+  type BuyNpcProductResponseDto,
   type CharacterDto,
   type CharacterEquipmentResponseDto,
   type CharacterHuntRewardItemDto,
@@ -13,6 +14,9 @@ import {
   type HuntSegmentsResponseDto,
   type HuntStrategyDto,
   type MoveInventoryItemResponseDto,
+  type NpcShopHistoryResponseDto,
+  type NpcTransactionDto,
+  type SellNpcItemResponseDto,
   type SessionMeResponseDto,
   type SettleHuntResponseDto,
   type SplitInventoryStackResponseDto,
@@ -40,6 +44,7 @@ import { CharacterView } from './components/CharacterView.js';
 import { DashboardView } from './components/DashboardView.js';
 import { HuntsView } from './components/HuntsView.js';
 import { InventoryView } from './components/InventoryView.js';
+import { NpcShopView } from './components/NpcShopView.js';
 import {
   GameButton,
   GameLog,
@@ -123,7 +128,7 @@ const memoryPendingKeys = new Map<string, string>();
 
 export function getPendingHuntKey(
   characterId: string,
-  op: 'start' | 'settle' | 'stop' | 'claim' | 'move' | 'split' | 'equip' | 'unequip',
+  op: 'start' | 'settle' | 'stop' | 'claim' | 'move' | 'split' | 'equip' | 'unequip' | 'shopBuy' | 'shopSell',
   huntId?: string
 ): string | null {
   const storageKey = `tibia_idle_pending_op:${characterId}:${op}${huntId ? `:${huntId}` : ''}`;
@@ -139,7 +144,7 @@ export function getPendingHuntKey(
 
 export function setPendingHuntKey(
   characterId: string,
-  op: 'start' | 'settle' | 'stop' | 'claim' | 'move' | 'split' | 'equip' | 'unequip',
+  op: 'start' | 'settle' | 'stop' | 'claim' | 'move' | 'split' | 'equip' | 'unequip' | 'shopBuy' | 'shopSell',
   idempotencyKey: string,
   huntId?: string
 ): void {
@@ -156,7 +161,7 @@ export function setPendingHuntKey(
 
 export function clearPendingHuntKey(
   characterId: string,
-  op: 'start' | 'settle' | 'stop' | 'claim' | 'move' | 'split' | 'equip' | 'unequip',
+  op: 'start' | 'settle' | 'stop' | 'claim' | 'move' | 'split' | 'equip' | 'unequip' | 'shopBuy' | 'shopSell',
   huntId?: string
 ): void {
   const storageKey = `tibia_idle_pending_op:${characterId}:${op}${huntId ? `:${huntId}` : ''}`;
@@ -224,6 +229,7 @@ export function App({
   const [equipment, setEquipment] = useState<CharacterEquipmentResponseDto | null>(null);
   const [claimingRewardId, setClaimingRewardId] = useState<string | null>(null);
   const [inventoryActionLoading, setInventoryActionLoading] = useState<boolean>(false);
+  const [shopHistory, setShopHistory] = useState<readonly NpcTransactionDto[]>([]);
   const [dynamicLogEntries, setDynamicLogEntries] = useState<GameLogEntry[]>([]);
 
   const activeCharacter = characters.find((c) => c.id === selectedCharacterId) ?? null;
@@ -533,6 +539,23 @@ export function App({
     [apiBaseUrl]
   );
 
+  const fetchShopHistory = useCallback(
+    async (charId: string) => {
+      try {
+        const res = await fetch(`${apiBaseUrl}/characters/${charId}/npc-shop/history`, {
+          credentials: 'include'
+        });
+        if (res.ok) {
+          const data = (await res.json()) as NpcShopHistoryResponseDto;
+          setShopHistory(data.transactions);
+        }
+      } catch {
+        // ignore
+      }
+    },
+    [apiBaseUrl]
+  );
+
   const handleOpenLatestReport = useCallback(async () => {
     if (!latestCompletedHuntId) return;
     setHuntActionLoading(true);
@@ -565,7 +588,8 @@ export function App({
     void fetchRewardItems(activeCharacter.id);
     void fetchInventory(activeCharacter.id);
     void fetchEquipment(activeCharacter.id);
-  }, [activeCharacter?.id, fetchActiveHunt, fetchRewardItems, fetchInventory, fetchEquipment]);
+    void fetchShopHistory(activeCharacter.id);
+  }, [activeCharacter?.id, fetchActiveHunt, fetchRewardItems, fetchInventory, fetchEquipment, fetchShopHistory]);
 
   useEffect(() => {
     if (!activeCharacter) return;
@@ -573,11 +597,14 @@ export function App({
       void fetchInventory(activeCharacter.id);
       void fetchRewardItems(activeCharacter.id);
       void fetchEquipment(activeCharacter.id);
+    } else if (activeTab === 'shop') {
+      void fetchShopHistory(activeCharacter.id);
+      void fetchInventory(activeCharacter.id);
     } else if (activeTab === 'hunts') {
       void fetchActiveHunt(activeCharacter.id);
       void fetchRewardItems(activeCharacter.id);
     }
-  }, [activeTab, activeCharacter?.id, fetchInventory, fetchRewardItems, fetchActiveHunt, fetchEquipment]);
+  }, [activeTab, activeCharacter?.id, fetchInventory, fetchRewardItems, fetchActiveHunt, fetchEquipment, fetchShopHistory]);
 
   useEffect(() => {
     if (!activeCharacter) return;
@@ -1082,6 +1109,180 @@ export function App({
     [activeCharacter, csrfToken, inventoryActionLoading, apiBaseUrl]
   );
 
+  const handleBuyShopProduct = useCallback(
+    async (offerId: string, quantity: number) => {
+      if (!activeCharacter || !csrfToken || inventoryActionLoading) return;
+      setInventoryActionLoading(true);
+      setErrorKey(null);
+
+      const opKey = `${offerId}:${quantity}`;
+      const idempotencyKey =
+        getPendingHuntKey(activeCharacter.id, 'shopBuy', opKey) || generateClientUUID();
+      setPendingHuntKey(activeCharacter.id, 'shopBuy', idempotencyKey, opKey);
+
+      try {
+        const res = await fetch(
+          `${apiBaseUrl}/characters/${activeCharacter.id}/npc-shop/buy`,
+          {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-csrf-token': csrfToken
+            },
+            body: JSON.stringify({ offerId, quantity, idempotencyKey })
+          }
+        );
+
+        if (!res.ok) {
+          const errBody = (await res.json().catch(() => null)) as {
+            error?: { messageKey?: string };
+          } | null;
+          setErrorKey((errBody?.error?.messageKey as TranslationKey) ?? 'common.error');
+          return;
+        }
+
+        const data = (await res.json()) as BuyNpcProductResponseDto;
+        clearPendingHuntKey(activeCharacter.id, 'shopBuy', opKey);
+
+        setCharacters((prev) =>
+          prev.map((c) =>
+            c.id === activeCharacter.id
+              ? {
+                  ...c,
+                  hpPotions: data.productId === 'health-potion' ? data.newPotionCount : c.hpPotions,
+                  mpPotions: data.productId === 'mana-potion' ? data.newPotionCount : c.mpPotions,
+                  stats: {
+                    ...c.stats,
+                    gold: data.newGoldBalance
+                  }
+                }
+              : c
+          )
+        );
+
+        if (!data.idempotentReplay) {
+          const nowTime = new Date().toLocaleTimeString(locale === 'pl' ? 'pl-PL' : 'en-US', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+          });
+          const itemName = t(
+            locale,
+            data.productId === 'health-potion' ? 'shop.healthPotion' : 'shop.manaPotion'
+          );
+          setDynamicLogEntries((prev) => [
+            ...prev,
+            {
+              id: `shop-buy-${Date.now()}`,
+              time: nowTime,
+              channel: 'system',
+              tone: 'info',
+              text: t(locale, 'shop.successBuy', {
+                quantity: data.quantity,
+                item: itemName,
+                gold: data.totalCostGold
+              })
+            }
+          ]);
+        }
+
+        void fetchShopHistory(activeCharacter.id);
+      } catch {
+        setErrorKey('common.error');
+      } finally {
+        setInventoryActionLoading(false);
+      }
+    },
+    [activeCharacter, csrfToken, inventoryActionLoading, apiBaseUrl, locale, fetchShopHistory]
+  );
+
+  const handleSellShopItem = useCallback(
+    async (itemId: string, quantity: number, slotIndex?: number) => {
+      if (!activeCharacter || !csrfToken || inventoryActionLoading) return;
+      setInventoryActionLoading(true);
+      setErrorKey(null);
+
+      const opKey = `${itemId}:${quantity}:${slotIndex ?? 'auto'}`;
+      const idempotencyKey =
+        getPendingHuntKey(activeCharacter.id, 'shopSell', opKey) || generateClientUUID();
+      setPendingHuntKey(activeCharacter.id, 'shopSell', idempotencyKey, opKey);
+
+      try {
+        const res = await fetch(
+          `${apiBaseUrl}/characters/${activeCharacter.id}/npc-shop/sell`,
+          {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-csrf-token': csrfToken
+            },
+            body: JSON.stringify({ itemId, quantity, slotIndex, idempotencyKey })
+          }
+        );
+
+        if (!res.ok) {
+          const errBody = (await res.json().catch(() => null)) as {
+            error?: { messageKey?: string };
+          } | null;
+          setErrorKey((errBody?.error?.messageKey as TranslationKey) ?? 'common.error');
+          return;
+        }
+
+        const data = (await res.json()) as SellNpcItemResponseDto;
+        clearPendingHuntKey(activeCharacter.id, 'shopSell', opKey);
+
+        setInventory(data.inventory);
+
+        setCharacters((prev) =>
+          prev.map((c) =>
+            c.id === activeCharacter.id
+              ? {
+                  ...c,
+                  stats: {
+                    ...c.stats,
+                    gold: data.newGoldBalance
+                  }
+                }
+              : c
+          )
+        );
+
+        if (!data.idempotentReplay) {
+          const nowTime = new Date().toLocaleTimeString(locale === 'pl' ? 'pl-PL' : 'en-US', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+          });
+          const itemSlot = inventory?.slots.find((s) => s.itemId === data.itemId);
+          const itemName = itemSlot ? t(locale, itemSlot.nameKey as TranslationKey) : data.itemId;
+          setDynamicLogEntries((prev) => [
+            ...prev,
+            {
+              id: `shop-sell-${Date.now()}`,
+              time: nowTime,
+              channel: 'system',
+              tone: 'info',
+              text: t(locale, 'shop.successSell', {
+                quantity: data.quantitySold,
+                item: itemName,
+                gold: data.totalPayoutGold
+              })
+            }
+          ]);
+        }
+
+        void fetchShopHistory(activeCharacter.id);
+      } catch {
+        setErrorKey('common.error');
+      } finally {
+        setInventoryActionLoading(false);
+      }
+    },
+    [activeCharacter, csrfToken, inventoryActionLoading, apiBaseUrl, locale, fetchShopHistory]
+  );
+
   const logEntries = useMemo<readonly GameLogEntry[]>(() => {
     const list: GameLogEntry[] = [
       {
@@ -1524,6 +1725,19 @@ export function App({
                   onSplitStack={handleSplitStack}
                   onEquipItem={handleEquipItem}
                   onUnequipItem={handleUnequipItem}
+                  actionLoading={inventoryActionLoading}
+                />
+              ) : activeTab === 'shop' ? (
+                <NpcShopView
+                  locale={locale}
+                  characterGold={activeCharacter.stats.gold}
+                  hpPotions={activeCharacter.hpPotions}
+                  mpPotions={activeCharacter.mpPotions}
+                  inventory={inventory}
+                  isActiveHunt={Boolean(activeHunt && activeHunt.status === 'ACTIVE')}
+                  history={shopHistory}
+                  onBuyProduct={handleBuyShopProduct}
+                  onSellItem={handleSellShopItem}
                   actionLoading={inventoryActionLoading}
                 />
               ) : activeTab === 'bestiary' ? (

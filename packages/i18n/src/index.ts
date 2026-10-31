@@ -25,6 +25,16 @@ export function getDictionary(locale: SupportedLocale): Readonly<TranslationDict
   return dictionaries[locale];
 }
 
-export function t(locale: SupportedLocale, key: TranslationKey): string {
-  return dictionaries[locale][key];
+export function t(
+  locale: SupportedLocale,
+  key: TranslationKey,
+  params?: Record<string, string | number>
+): string {
+  let text = dictionaries[locale][key];
+  if (params) {
+    for (const [paramKey, paramVal] of Object.entries(params)) {
+      text = text.replaceAll(`{${paramKey}}`, String(paramVal));
+    }
+  }
+  return text;
 }

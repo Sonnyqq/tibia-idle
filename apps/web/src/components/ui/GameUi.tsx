@@ -216,16 +216,16 @@ export function StatRow({
 export interface ItemSlotProps {
   slotId: string;
   label: string;
-  iconKey?: string;
-  asset?: AssetRefDto;
-  category?: AssetCategory;
-  state?: 'empty' | 'occupied' | 'selected' | 'disabled';
-  rarity?: ItemRarityDto;
-  stackCount?: number;
-  selected?: boolean;
-  disabled?: boolean;
-  onSelect?: () => void;
-  testId?: string;
+  iconKey?: string | undefined;
+  asset?: AssetRefDto | undefined;
+  category?: AssetCategory | undefined;
+  state?: ('empty' | 'occupied' | 'selected' | 'disabled') | undefined;
+  rarity?: ItemRarityDto | undefined;
+  stackCount?: number | undefined;
+  selected?: boolean | undefined;
+  disabled?: boolean | undefined;
+  onSelect?: (() => void) | undefined;
+  testId?: string | undefined;
 }
 
 export function ItemSlot({
