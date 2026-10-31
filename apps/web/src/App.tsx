@@ -4,11 +4,15 @@ import {
   type CharacterDto,
   type CharacterHuntRewardItemDto,
   type CharacterHuntRewardsResponseDto,
+  type CharacterInventoryResponseDto,
+  type ClaimHuntRewardResponseDto,
   EQUIPMENT_SLOTS,
   type HuntSegmentsResponseDto,
   type HuntStrategyDto,
+  type MoveInventoryItemResponseDto,
   type SessionMeResponseDto,
   type SettleHuntResponseDto,
+  type SplitInventoryStackResponseDto,
   type StartHuntResponseDto,
   type StopHuntResponseDto,
   type UserDto,
@@ -115,7 +119,7 @@ const memoryPendingKeys = new Map<string, string>();
 
 export function getPendingHuntKey(
   characterId: string,
-  op: 'start' | 'settle' | 'stop',
+  op: 'start' | 'settle' | 'stop' | 'claim' | 'move' | 'split',
   huntId?: string
 ): string | null {
   const storageKey = `tibia_idle_pending_op:${characterId}:${op}${huntId ? `:${huntId}` : ''}`;
@@ -131,7 +135,7 @@ export function getPendingHuntKey(
 
 export function setPendingHuntKey(
   characterId: string,
-  op: 'start' | 'settle' | 'stop',
+  op: 'start' | 'settle' | 'stop' | 'claim' | 'move' | 'split',
   idempotencyKey: string,
   huntId?: string
 ): void {
@@ -148,7 +152,7 @@ export function setPendingHuntKey(
 
 export function clearPendingHuntKey(
   characterId: string,
-  op: 'start' | 'settle' | 'stop',
+  op: 'start' | 'settle' | 'stop' | 'claim' | 'move' | 'split',
   huntId?: string
 ): void {
   const storageKey = `tibia_idle_pending_op:${characterId}:${op}${huntId ? `:${huntId}` : ''}`;
@@ -212,6 +216,9 @@ export function App({
   const [huntReport, setHuntReport] = useState<HuntSegmentsResponseDto | null>(null);
   const [latestCompletedHuntId, setLatestCompletedHuntId] = useState<string | null>(null);
   const [rewardItems, setRewardItems] = useState<readonly CharacterHuntRewardItemDto[]>([]);
+  const [inventory, setInventory] = useState<CharacterInventoryResponseDto | null>(null);
+  const [claimingRewardId, setClaimingRewardId] = useState<string | null>(null);
+  const [inventoryActionLoading, setInventoryActionLoading] = useState<boolean>(false);
   const [dynamicLogEntries, setDynamicLogEntries] = useState<GameLogEntry[]>([]);
 
   const activeCharacter = characters.find((c) => c.id === selectedCharacterId) ?? null;
@@ -479,6 +486,26 @@ export function App({
     [apiBaseUrl]
   );
 
+  const fetchInventory = useCallback(
+    async (charId: string) => {
+      try {
+        const res = await fetch(`${apiBaseUrl}/characters/${charId}/inventory`, {
+          method: 'GET',
+          credentials: 'include'
+        });
+        if (res.ok) {
+          const data = (await res.json()) as CharacterInventoryResponseDto;
+          setInventory(data);
+          return data;
+        }
+      } catch {
+        // Network error
+      }
+      return null;
+    },
+    [apiBaseUrl]
+  );
+
   const handleOpenLatestReport = useCallback(async () => {
     if (!latestCompletedHuntId) return;
     setHuntActionLoading(true);
@@ -503,11 +530,24 @@ export function App({
       setActiveHunt(null);
       setLatestCompletedHuntId(null);
       setRewardItems([]);
+      setInventory(null);
       return;
     }
     void fetchActiveHunt(activeCharacter.id);
     void fetchRewardItems(activeCharacter.id);
-  }, [activeCharacter?.id, fetchActiveHunt, fetchRewardItems]);
+    void fetchInventory(activeCharacter.id);
+  }, [activeCharacter?.id, fetchActiveHunt, fetchRewardItems, fetchInventory]);
+
+  useEffect(() => {
+    if (!activeCharacter) return;
+    if (activeTab === 'inventory') {
+      void fetchInventory(activeCharacter.id);
+      void fetchRewardItems(activeCharacter.id);
+    } else if (activeTab === 'hunts') {
+      void fetchActiveHunt(activeCharacter.id);
+      void fetchRewardItems(activeCharacter.id);
+    }
+  }, [activeTab, activeCharacter?.id, fetchInventory, fetchRewardItems, fetchActiveHunt]);
 
   useEffect(() => {
     if (!activeCharacter) return;
@@ -775,6 +815,153 @@ export function App({
       setHuntActionLoading(false);
     }
   };
+
+  const handleClaimReward = useCallback(
+    async (rewardId: string) => {
+      if (!activeCharacter || !csrfToken || claimingRewardId) return;
+      setClaimingRewardId(rewardId);
+      setErrorKey(null);
+
+      const idempotencyKey =
+        getPendingHuntKey(activeCharacter.id, 'claim', rewardId) || generateClientUUID();
+      setPendingHuntKey(activeCharacter.id, 'claim', idempotencyKey, rewardId);
+
+      try {
+        const res = await fetch(
+          `${apiBaseUrl}/characters/${activeCharacter.id}/hunt-rewards/${rewardId}/claim`,
+          {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-csrf-token': csrfToken
+            },
+            body: JSON.stringify({ idempotencyKey })
+          }
+        );
+
+        if (!res.ok) {
+          const errBody = (await res.json().catch(() => null)) as {
+            error?: { messageKey?: string };
+          } | null;
+          setErrorKey((errBody?.error?.messageKey as TranslationKey) ?? 'common.error');
+          return;
+        }
+
+        const data = (await res.json()) as ClaimHuntRewardResponseDto;
+        clearPendingHuntKey(activeCharacter.id, 'claim', rewardId);
+        setInventory(data.inventory);
+        await fetchRewardItems(activeCharacter.id);
+
+        if (!data.idempotentReplay) {
+          const nowTime = new Date().toLocaleTimeString(locale === 'pl' ? 'pl-PL' : 'en-US', {
+            hour: '2-digit',
+            minute: '2-digit'
+          });
+          const itemName = t(locale, data.claimedItem.nameKey as TranslationKey);
+          setDynamicLogEntries((prev) => [
+            ...prev,
+            {
+              id: `claim-${Date.now()}-${data.claimedItem.id}`,
+              time: nowTime,
+              channel: 'loot',
+              tone: 'info',
+              text: `${t(locale, 'inventory.rewardClaimedSuccess')}: ${itemName} (x${data.claimedItem.quantity})`
+            }
+          ]);
+        }
+      } catch {
+        setErrorKey('common.error');
+      } finally {
+        setClaimingRewardId(null);
+      }
+    },
+    [activeCharacter, csrfToken, claimingRewardId, apiBaseUrl, locale, fetchRewardItems]
+  );
+
+  const handleMoveItem = useCallback(
+    async (fromSlot: number, toSlot: number) => {
+      if (!activeCharacter || !csrfToken || inventoryActionLoading) return;
+      setInventoryActionLoading(true);
+      setErrorKey(null);
+
+      const opKey = `${fromSlot}->${toSlot}`;
+      const idempotencyKey =
+        getPendingHuntKey(activeCharacter.id, 'move', opKey) || generateClientUUID();
+      setPendingHuntKey(activeCharacter.id, 'move', idempotencyKey, opKey);
+
+      try {
+        const res = await fetch(`${apiBaseUrl}/characters/${activeCharacter.id}/inventory/move`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-csrf-token': csrfToken
+          },
+          body: JSON.stringify({ fromSlot, toSlot, idempotencyKey })
+        });
+
+        if (!res.ok) {
+          const errBody = (await res.json().catch(() => null)) as {
+            error?: { messageKey?: string };
+          } | null;
+          setErrorKey((errBody?.error?.messageKey as TranslationKey) ?? 'common.error');
+          return;
+        }
+
+        const data = (await res.json()) as MoveInventoryItemResponseDto;
+        clearPendingHuntKey(activeCharacter.id, 'move', opKey);
+        setInventory(data.inventory);
+      } catch {
+        setErrorKey('common.error');
+      } finally {
+        setInventoryActionLoading(false);
+      }
+    },
+    [activeCharacter, csrfToken, inventoryActionLoading, apiBaseUrl]
+  );
+
+  const handleSplitStack = useCallback(
+    async (fromSlot: number, toSlot: number, quantity: number) => {
+      if (!activeCharacter || !csrfToken || inventoryActionLoading) return;
+      setInventoryActionLoading(true);
+      setErrorKey(null);
+
+      const opKey = `${fromSlot}->${toSlot}:${quantity}`;
+      const idempotencyKey =
+        getPendingHuntKey(activeCharacter.id, 'split', opKey) || generateClientUUID();
+      setPendingHuntKey(activeCharacter.id, 'split', idempotencyKey, opKey);
+
+      try {
+        const res = await fetch(`${apiBaseUrl}/characters/${activeCharacter.id}/inventory/split`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-csrf-token': csrfToken
+          },
+          body: JSON.stringify({ fromSlot, toSlot, quantity, idempotencyKey })
+        });
+
+        if (!res.ok) {
+          const errBody = (await res.json().catch(() => null)) as {
+            error?: { messageKey?: string };
+          } | null;
+          setErrorKey((errBody?.error?.messageKey as TranslationKey) ?? 'common.error');
+          return;
+        }
+
+        const data = (await res.json()) as SplitInventoryStackResponseDto;
+        clearPendingHuntKey(activeCharacter.id, 'split', opKey);
+        setInventory(data.inventory);
+      } catch {
+        setErrorKey('common.error');
+      } finally {
+        setInventoryActionLoading(false);
+      }
+    },
+    [activeCharacter, csrfToken, inventoryActionLoading, apiBaseUrl]
+  );
 
   const logEntries = useMemo<readonly GameLogEntry[]>(() => {
     const list: GameLogEntry[] = [
@@ -1197,11 +1384,22 @@ export function App({
                   }
                   latestCompletedHuntId={latestCompletedHuntId}
                   onOpenLatestReport={handleOpenLatestReport}
+                  onClaimReward={handleClaimReward}
+                  claimingRewardId={claimingRewardId}
                 />
               ) : activeTab === 'character' ? (
                 <CharacterView locale={locale} character={activeCharacter} />
               ) : activeTab === 'inventory' ? (
-                <InventoryView locale={locale} />
+                <InventoryView
+                  locale={locale}
+                  inventory={inventory}
+                  rewardItems={rewardItems}
+                  onClaimReward={handleClaimReward}
+                  claimingRewardId={claimingRewardId}
+                  onMoveItem={handleMoveItem}
+                  onSplitStack={handleSplitStack}
+                  actionLoading={inventoryActionLoading}
+                />
               ) : activeTab === 'bestiary' ? (
                 <BestiaryView
                   locale={locale}

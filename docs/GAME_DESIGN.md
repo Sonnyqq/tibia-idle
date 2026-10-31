@@ -46,6 +46,26 @@ Show estimates as ranges until sufficient events. Use controlled data and review
   - Strategies (`safe`, `balanced`, `aggressive`) govern attack/defense stance, auto-potion thresholds, mana strike usage, and critical retreat when out of HP potions. No artificial XP or drop rate multipliers exist.
   - Per-kill loot (`rollMonsterKillLoot`) rolls gold `[goldMin, goldMax]` and per-item `chancePermille` strictly once upon confirmed monster death (`newMonsterHp <= 0`).
 
+## Persistent inventory, backpack & AFK loot claim (`IDLE-005A`)
+- **Capacity & Weight System:** Server-authoritative integer weight model (`1 oz = 1 integer weight unit`).
+  - Base capacity and level progression per vocation:
+    - **Knight:** `5000 + (level - 1) * 250` oz
+    - **Paladin:** `4000 + (level - 1) * 200` oz
+    - **Mage (Offensive / Sustain):** `3000 + (level - 1) * 100` oz
+  - Every item definition has a fixed integer weight (e.g. `copper-coin: 1`, `iron-sword: 400`, `rusted-blade: 520`, `health-potion: 25`, `leather-armor: 650`).
+- **Starting Backpack & Slots:** Characters are created with a 20-slot starting backpack container (`BACKPACK_STARTING_SLOTS = 20`, `slot_index` 0 to 19).
+- **Stacking, Moving & Splitting:**
+  - Stackable items stack up to `maxStackSize = 100` per slot. Non-stackable items occupy 1 item per slot.
+  - Moving to an empty slot updates `slot_index`.
+  - Moving to a matching stackable slot merges quantities up to `maxStackSize` (overflow stays in source).
+  - Moving to a non-matching or full slot atomically swaps slot indices (using deferred database constraints).
+  - Splitting a stack (`splitInventoryStack`) removes `splitQuantity` from the source slot and creates or adds to a target slot.
+- **AFK Reward Inbox & Atomic Claims:**
+  - Hunt loot settles into `hunt_reward_items` in state `UNCLAIMED`.
+  - Players claim rewards individually into their backpack via `POST /characters/:id/hunt-rewards/:rewardId/claim`.
+  - Server transaction locks the character and reward item (`FOR UPDATE`), verifies character ownership, checks weight capacity (`currentWeight + itemWeight <= maxWeight`) and slot availability, marks the reward `CLAIMED`, inserts/merges into `inventory_instances`, and records an immutable audit record in `inventory_movements` (`movement_type = CLAIM_HUNT_REWARD`).
+  - Claim requests require client idempotency keys, guaranteeing zero item duplication across retries, reloads, and network drops.
+
 ## Localization
 Use keys, pluralization, locale-aware numbers and dates; avoid embedding English or Polish text in logic. Players can change locale anytime; account/global content IDs remain language-neutral. Initial locales `pl-PL`, `en-US`.
 

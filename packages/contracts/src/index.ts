@@ -481,3 +481,123 @@ export const ApiErrorSchema = z.object({
   })
 });
 export type ApiErrorDto = z.infer<typeof ApiErrorSchema>;
+
+// ==========================================
+// P04 / IDLE-005A: Inventory & Item Contracts
+// ==========================================
+
+export const ItemTypeSchema = z.enum(['material', 'loot', 'equipment', 'consumable', 'currency']);
+export type ItemTypeDto = z.infer<typeof ItemTypeSchema>;
+
+export const ItemDefinitionSchema = z.object({
+  itemId: z.string().min(1),
+  nameKey: z.string().min(1),
+  rarity: ItemRaritySchema,
+  assetId: z.string().min(1),
+  fallbackIconKey: z.string().min(1),
+  itemType: ItemTypeSchema,
+  stackable: z.boolean(),
+  maxStackSize: z.number().int().min(1),
+  weightUnits: z.number().int().min(0),
+  equipmentSlot: EquipmentSlotSchema.optional(),
+  metadataVersion: z.string().min(1)
+});
+export type ItemDefinitionDto = z.infer<typeof ItemDefinitionSchema>;
+
+export const InventorySlotItemSchema = z.object({
+  id: z.string().uuid(),
+  containerId: z.string().uuid(),
+  slotIndex: z.number().int().min(0).max(99),
+  itemId: z.string().min(1),
+  nameKey: z.string().min(1),
+  rarity: ItemRaritySchema,
+  assetId: z.string().min(1),
+  fallbackIconKey: z.string().min(1),
+  itemType: ItemTypeSchema,
+  stackable: z.boolean(),
+  maxStackSize: z.number().int().min(1),
+  weightUnits: z.number().int().min(0),
+  totalWeight: z.number().int().min(0),
+  quantity: z.number().int().min(1),
+  rowVersion: z.number().int().min(1)
+});
+export type InventorySlotItemDto = z.infer<typeof InventorySlotItemSchema>;
+
+export const InventoryContainerSchema = z.object({
+  id: z.string().uuid(),
+  characterId: z.string().uuid(),
+  containerType: z.literal('backpack'),
+  slotCapacity: z.number().int().min(1).max(100),
+  occupiedSlots: z.number().int().min(0),
+  rowVersion: z.number().int().min(1)
+});
+export type InventoryContainerDto = z.infer<typeof InventoryContainerSchema>;
+
+export const CharacterInventoryCapacitySchema = z.object({
+  currentWeight: z.number().int().min(0),
+  maxWeight: z.number().int().min(0),
+  remainingCapacity: z.number().int().min(0),
+  occupiedSlots: z.number().int().min(0),
+  maxSlots: z.number().int().min(1)
+});
+export type CharacterInventoryCapacityDto = z.infer<typeof CharacterInventoryCapacitySchema>;
+
+export const CharacterInventoryResponseSchema = z.object({
+  characterId: z.string().uuid(),
+  container: InventoryContainerSchema,
+  slots: z.array(InventorySlotItemSchema),
+  capacity: CharacterInventoryCapacitySchema
+});
+export type CharacterInventoryResponseDto = z.infer<typeof CharacterInventoryResponseSchema>;
+
+export const CharacterContainersResponseSchema = z.object({
+  characterId: z.string().uuid(),
+  containers: z.array(InventoryContainerSchema)
+});
+export type CharacterContainersResponseDto = z.infer<typeof CharacterContainersResponseSchema>;
+
+export const MoveInventoryItemRequestSchema = z.object({
+  containerId: z.string().uuid().optional(),
+  fromSlot: z.number().int().min(0).max(99),
+  toSlot: z.number().int().min(0).max(99),
+  idempotencyKey: z.string().min(1).max(128)
+});
+export type MoveInventoryItemRequestDto = z.infer<typeof MoveInventoryItemRequestSchema>;
+
+export const MoveInventoryItemResponseSchema = z.object({
+  characterId: z.string().uuid(),
+  action: z.enum(['MOVED', 'MERGED', 'SWAPPED']),
+  inventory: CharacterInventoryResponseSchema,
+  idempotentReplay: z.boolean()
+});
+export type MoveInventoryItemResponseDto = z.infer<typeof MoveInventoryItemResponseSchema>;
+
+export const SplitInventoryStackRequestSchema = z.object({
+  containerId: z.string().uuid().optional(),
+  fromSlot: z.number().int().min(0).max(99),
+  toSlot: z.number().int().min(0).max(99),
+  quantity: z.number().int().min(1),
+  idempotencyKey: z.string().min(1).max(128)
+});
+export type SplitInventoryStackRequestDto = z.infer<typeof SplitInventoryStackRequestSchema>;
+
+export const SplitInventoryStackResponseSchema = z.object({
+  characterId: z.string().uuid(),
+  inventory: CharacterInventoryResponseSchema,
+  idempotentReplay: z.boolean()
+});
+export type SplitInventoryStackResponseDto = z.infer<typeof SplitInventoryStackResponseSchema>;
+
+export const ClaimHuntRewardRequestSchema = z.object({
+  idempotencyKey: z.string().min(1).max(128)
+});
+export type ClaimHuntRewardRequestDto = z.infer<typeof ClaimHuntRewardRequestSchema>;
+
+export const ClaimHuntRewardResponseSchema = z.object({
+  characterId: z.string().uuid(),
+  rewardId: z.string().uuid(),
+  claimedItem: CharacterHuntRewardItemDtoSchema,
+  inventory: CharacterInventoryResponseSchema,
+  idempotentReplay: z.boolean()
+});
+export type ClaimHuntRewardResponseDto = z.infer<typeof ClaimHuntRewardResponseSchema>;

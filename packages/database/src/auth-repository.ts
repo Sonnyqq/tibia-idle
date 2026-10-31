@@ -403,6 +403,15 @@ export async function createCharacterTransactional(
       );
     }
 
+    await client.query(
+      `INSERT INTO inventory_containers (
+         id, character_id, container_type, slot_capacity, row_version, created_at
+       )
+       VALUES ($1, $2, 'backpack', 20, 1, $3::timestamptz)
+       ON CONFLICT (character_id, container_type) DO NOTHING`,
+      [randomUUID(), characterId, params.nowIso]
+    );
+
     await client.query('COMMIT');
     return { ok: true, character: mapCharacterDto(row) };
   } catch (err) {

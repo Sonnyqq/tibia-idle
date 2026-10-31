@@ -525,4 +525,5 @@ export function createSeededRng(seed: number): DeterministicRng {
 }
 
 export * from './combat/index.js';
+export * from './items.js';
 

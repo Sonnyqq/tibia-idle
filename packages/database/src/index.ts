@@ -45,6 +45,21 @@ export {
   type StopHuntResult,
   stopHunt
 } from './hunt-repository.js';
+export {
+  type ClaimHuntRewardInput,
+  type ClaimHuntRewardResult,
+  claimHuntReward,
+  getCharacterContainers,
+  getCharacterInventory,
+  type InventoryContainerDbRow,
+  type InventoryInstanceDbRow,
+  type MoveInventoryItemInput,
+  type MoveInventoryItemResult,
+  moveInventoryItem,
+  type SplitInventoryStackInput,
+  type SplitInventoryStackResult,
+  splitInventoryStack
+} from './inventory-repository.js';
 
 export interface DatabaseConfig {
   connectionString: string;

@@ -20,14 +20,15 @@ describe('PostgreSQL live database integration', () => {
       expect(healthy).toBe(true);
 
       await pool.query(
-        'DROP TABLE IF EXISTS currency_ledger, hunt_reward_items, hunt_segments, hunts, characters, sessions, users, schema_migrations CASCADE'
+        'DROP TABLE IF EXISTS inventory_movements, inventory_instances, inventory_containers, currency_ledger, hunt_reward_items, hunt_segments, hunts, characters, sessions, users, schema_migrations CASCADE'
       );
 
       const migrations = loadMigrationsFromDir();
       expect(migrations.map((m) => m.version)).toEqual([
         '0001_schema_migrations',
         '0002_auth_sessions_characters',
-        '0003_persistent_offline_hunts'
+        '0003_persistent_offline_hunts',
+        '0004_persistent_inventory_backpack'
       ]);
 
       // 1. Test incremental upgrade on a database that already has existing characters from 0002
@@ -53,9 +54,12 @@ describe('PostgreSQL live database integration', () => {
       );
 
       const step2Run = await applyMigrations(pool, migrations);
-      expect(step2Run).toEqual(['0003_persistent_offline_hunts']);
+      expect(step2Run).toEqual([
+        '0003_persistent_offline_hunts',
+        '0004_persistent_inventory_backpack'
+      ]);
 
-      // Verify existing character received one-time starter potion supplies and backfilled currency_ledger
+      // Verify existing character received one-time starter potion supplies, backfilled currency_ledger, and 20-slot backpack
       const migratedChar = await pool.query<{
         hp_potions: number;
         mp_potions: number;
@@ -82,16 +86,29 @@ describe('PostgreSQL live database integration', () => {
         balance_after: '100'
       });
 
+      const migratedBackpack = await pool.query<{
+        container_type: string;
+        slot_capacity: number;
+      }>('SELECT container_type, slot_capacity FROM inventory_containers WHERE character_id = $1', [
+        preCharId
+      ]);
+      expect(migratedBackpack.rows).toHaveLength(1);
+      expect(migratedBackpack.rows[0]).toEqual({
+        container_type: 'backpack',
+        slot_capacity: 20
+      });
+
       // 2. Test clean migration from empty database + idempotent re-run
       await pool.query(
-        'DROP TABLE IF EXISTS currency_ledger, hunt_reward_items, hunt_segments, hunts, characters, sessions, users, schema_migrations CASCADE'
+        'DROP TABLE IF EXISTS inventory_movements, inventory_instances, inventory_containers, currency_ledger, hunt_reward_items, hunt_segments, hunts, characters, sessions, users, schema_migrations CASCADE'
       );
 
       const firstRun = await applyMigrations(pool, migrations);
       expect(firstRun).toEqual([
         '0001_schema_migrations',
         '0002_auth_sessions_characters',
-        '0003_persistent_offline_hunts'
+        '0003_persistent_offline_hunts',
+        '0004_persistent_inventory_backpack'
       ]);
 
       const secondRun = await applyMigrations(pool, migrations);
@@ -100,13 +117,15 @@ describe('PostgreSQL live database integration', () => {
       const ledgerRows = await pool.query<{ version: string; checksum: string }>(
         'SELECT version, checksum FROM schema_migrations ORDER BY version ASC'
       );
-      expect(ledgerRows.rows).toHaveLength(3);
+      expect(ledgerRows.rows).toHaveLength(4);
       expect(ledgerRows.rows[0]?.version).toBe('0001_schema_migrations');
       expect(ledgerRows.rows[0]?.checksum).toBe(migrations[0]?.checksum);
       expect(ledgerRows.rows[1]?.version).toBe('0002_auth_sessions_characters');
       expect(ledgerRows.rows[1]?.checksum).toBe(migrations[1]?.checksum);
       expect(ledgerRows.rows[2]?.version).toBe('0003_persistent_offline_hunts');
       expect(ledgerRows.rows[2]?.checksum).toBe(migrations[2]?.checksum);
+      expect(ledgerRows.rows[3]?.version).toBe('0004_persistent_inventory_backpack');
+      expect(ledgerRows.rows[3]?.checksum).toBe(migrations[3]?.checksum);
 
       const tamperedMigrations = [
         {
