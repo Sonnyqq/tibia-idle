@@ -69,6 +69,9 @@ export interface PublicHuntSessionView {
   readonly reservedMpPotions: number;
   readonly potionsReturned: boolean;
   readonly rowVersion: number;
+  readonly snapshotMaxHp?: number;
+  readonly snapshotMaxMp?: number;
+  readonly snapshotLevel?: number;
   readonly checkpointView: PublicHuntCheckpointView;
 }
 
@@ -391,6 +394,9 @@ function mapPublicHuntView(
     reservedMpPotions: Number(row.reserved_mp_potions),
     potionsReturned: Boolean(row.potions_returned),
     rowVersion: Number(row.row_version),
+    snapshotMaxHp: validatedCheckpoint.snapshot.character.maxHp,
+    snapshotMaxMp: validatedCheckpoint.snapshot.character.maxMp,
+    snapshotLevel: validatedCheckpoint.snapshot.character.level,
     checkpointView
   };
 }
@@ -1781,6 +1787,7 @@ export async function reconcileCharacterEconomy(
 export function mapActiveHuntDto(
   huntView: PublicHuntSessionView,
   nowMs: number,
+  checkpoint?: CombatCheckpointState | null,
   maxOfflineMs: number = MAX_OFFLINE_DURATION_MS
 ): ActiveHuntDto {
   const settledDurationMs = huntView.checkpointView.elapsedMs;
@@ -1797,8 +1804,14 @@ export function mapActiveHuntDto(
     huntView.status === 'ACTIVE' &&
     unsettledDurationMs > 0;
 
-  const currentLevel = resolveLevelFromTotalXp(huntView.checkpointView.totalXpGained);
-  const vitals = calculateCharacterVitalsForLevel('knight', currentLevel);
+  // Use frozen authoritative snapshot maxHp/maxMp rather than computing level solely from hunt XP
+  const snapshotChar = checkpoint?.snapshot.character;
+  const snapshotLevel = snapshotChar?.level ?? huntView.snapshotLevel ?? 1;
+  const fallbackVitals = calculateCharacterVitalsForLevel('knight', snapshotLevel);
+  const maxHp = snapshotChar?.maxHp ?? huntView.snapshotMaxHp ?? fallbackVitals.maxHp;
+  const maxMp = snapshotChar?.maxMp ?? huntView.snapshotMaxMp ?? fallbackVitals.maxMp;
+  const hp = Math.min(huntView.checkpointView.currentHp, maxHp);
+  const mp = Math.min(huntView.checkpointView.currentMp, maxMp);
 
   return {
     huntId: huntView.huntId,
@@ -1814,10 +1827,10 @@ export function mapActiveHuntDto(
     settledDurationMs,
     unsettledDurationMs,
     maxOfflineDurationMs: maxOfflineMs,
-    hp: huntView.checkpointView.currentHp,
-    maxHp: vitals.maxHp,
-    mp: huntView.checkpointView.currentMp,
-    maxMp: vitals.maxMp,
+    hp,
+    maxHp,
+    mp,
+    maxMp,
     reservedHpPotions: huntView.reservedHpPotions,
     reservedMpPotions: huntView.reservedMpPotions,
     hpPotionsRemaining: huntView.checkpointView.hpPotionsRemaining,
@@ -1870,7 +1883,7 @@ export async function getActiveHuntForCharacter(
       activeRow.config_digest
     );
     const huntView = mapPublicHuntView(activeRow, cp);
-    const activeDto = mapActiveHuntDto(huntView, nowMs);
+    const activeDto = mapActiveHuntDto(huntView, nowMs, cp);
     return {
       active: true,
       hunt: activeDto,

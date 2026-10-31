@@ -233,6 +233,9 @@ export const PublicHuntSessionViewSchema = z.object({
   reservedMpPotions: z.number().int().min(0),
   potionsReturned: z.boolean(),
   rowVersion: z.number().int().min(1),
+  snapshotMaxHp: z.number().int().min(1).optional(),
+  snapshotMaxMp: z.number().int().min(0).optional(),
+  snapshotLevel: z.number().int().min(1).optional(),
   checkpointView: PublicHuntCheckpointViewSchema
 });
 export type PublicHuntSessionViewDto = z.infer<typeof PublicHuntSessionViewSchema>;

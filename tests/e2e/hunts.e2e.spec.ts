@@ -11,7 +11,7 @@ test('completes full playable AFK offline hunt slice: start, active monitoring, 
 
   const consoleErrors: string[] = [];
   page.on('console', (msg) => {
-    if (msg.type() === 'error') {
+    if (msg.type() === 'error' && !msg.text().includes('401 (Unauthorized)')) {
       consoleErrors.push(msg.text());
     }
   });
@@ -36,7 +36,11 @@ test('completes full playable AFK offline hunt slice: start, active monitoring, 
 
   // Create Knight character
   await expect(page.getByTestId('character-select-panel')).toBeVisible();
-  await page.getByTestId('character-name-input').fill('HuntMaster');
+  const randomSuffix = Array.from({ length: 6 }, () =>
+    String.fromCharCode(97 + Math.floor(Math.random() * 26))
+  ).join('');
+  const charName = `Hunt${randomSuffix}`;
+  await page.getByTestId('character-name-input').fill(charName);
   await page.getByTestId('character-vocation-select').selectOption('knight');
   await page.getByTestId('character-create-submit').click();
 
@@ -124,13 +128,24 @@ test('completes full playable AFK offline hunt slice: start, active monitoring, 
   // 6. Verify AFK Reward Inbox is visible
   await expect(page.getByTestId('reward-inbox-window')).toBeVisible();
 
-  // 7. Test F5 Reload persistence
+  // 7. Test F5 Reload persistence & Report Restore
   await page.reload();
   await expect(page.getByTestId('app-shell')).toBeVisible();
   await expect(page.getByTestId('hunts-view')).toBeVisible();
   await expect(page.getByTestId('reward-inbox-window')).toBeVisible();
 
-  // 8. Mobile 390x844 responsive check
+  // Test persistent report restore via "Ostatnie polowanie" / "Last Hunt" button
+  const openReportBtn = page.getByTestId('open-latest-report-button');
+  await expect(openReportBtn).toBeVisible();
+  await openReportBtn.click();
+  await expect(page.getByTestId('hunt-report-window')).toBeVisible();
+  await page.getByTestId('close-report-button').click();
+  await expect(page.getByTestId('hunt-report-window')).not.toBeVisible();
+
+  // 8. Mobile 320x640 and 390x844 responsive check
+  await page.setViewportSize({ width: 320, height: 640 });
+  await assertNoHorizontalOverflow();
+
   await page.setViewportSize({ width: 390, height: 844 });
   await assertNoHorizontalOverflow();
   await page.screenshot({
@@ -139,4 +154,77 @@ test('completes full playable AFK offline hunt slice: start, active monitoring, 
   });
 
   expect(consoleErrors).toEqual([]);
+});
+
+test('recovers session and active hunt in new tab without sessionStorage using HttpOnly cookie', async ({
+  browser
+}) => {
+  const context1 = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page1 = await context1.newPage();
+
+  // 1. Register & create knight in context 1
+  await page1.goto('/');
+  await page1.getByTestId('auth-mode-toggle').click();
+  const uniqueEmail = `cookie-recovery-${Date.now()}@example.com`;
+  await page1.getByTestId('auth-email-input').fill(uniqueEmail);
+  await page1.getByTestId('auth-password-input').fill('CookiePass123!');
+  await page1.getByTestId('auth-submit-button').click();
+
+  await expect(page1.getByTestId('character-select-panel')).toBeVisible();
+  const randomSuffix2 = Array.from({ length: 6 }, () =>
+    String.fromCharCode(97 + Math.floor(Math.random() * 26))
+  ).join('');
+  const charName2 = `Cookie${randomSuffix2}`;
+  await page1.getByTestId('character-name-input').fill(charName2);
+  await page1.getByTestId('character-vocation-select').selectOption('knight');
+  await page1.getByTestId('character-create-submit').click();
+  await expect(page1.getByTestId('character-dashboard')).toBeVisible();
+
+  // 2. Start hunt in damp-catacombs
+  await page1.getByTestId('nav.hunts').click();
+  await page1.getByTestId('zone-card-damp-catacombs').click();
+  await page1.getByTestId('strategy-option-balanced').click();
+  await page1.getByTestId('hp-potions-input').fill('15');
+  await page1.getByTestId('mp-potions-input').fill('10');
+  await page1.getByTestId('start-hunt-button').click();
+  await expect(page1.getByTestId('active-hunt-window')).toBeVisible({ timeout: 10000 });
+
+  // 3. Extract HttpOnly cookies & close context 1 completely (clearing all sessionStorage/localStorage)
+  const cookies = await context1.cookies();
+  await context1.close();
+
+  // 4. Create context 2 with zero sessionStorage, add HttpOnly cookies and open fresh tab
+  const context2 = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  await context2.addCookies(cookies);
+  const page2 = await context2.newPage();
+
+  await page2.goto('/');
+  // Server-authoritative /me verifies session cookie and auto-restores character
+  await expect(page2.getByTestId('character-dashboard')).toBeVisible({ timeout: 10000 });
+
+  // Navigate to Hunts tab: active hunt is restored
+  await page2.getByTestId('nav.hunts').click();
+  await expect(page2.getByTestId('active-hunt-window')).toBeVisible();
+
+  // Wait a moment for combat, then settle & stop
+  await page2.waitForTimeout(2000);
+  await page2.getByTestId('settle-hunt-button').click();
+  await expect(page2.getByTestId('active-hunt-window')).toBeVisible();
+
+  await page2.waitForTimeout(1000);
+  await page2.getByTestId('stop-hunt-button').click();
+  await expect(page2.getByTestId('active-hunt-window')).not.toBeVisible({ timeout: 10000 });
+  await expect(page2.getByTestId('hunt-report-window')).toBeVisible();
+  await page2.getByTestId('close-report-button').click();
+
+  // 5. Reload (F5) in context 2
+  await page2.reload();
+  await expect(page2.getByTestId('app-shell')).toBeVisible();
+  await expect(page2.getByTestId('open-latest-report-button')).toBeVisible();
+
+  // Re-open report via "Ostatnie polowanie"
+  await page2.getByTestId('open-latest-report-button').click();
+  await expect(page2.getByTestId('hunt-report-window')).toBeVisible();
+
+  await context2.close();
 });

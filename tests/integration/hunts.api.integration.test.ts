@@ -20,7 +20,7 @@ import {
   loadMigrationsFromDir,
   resolveTestDatabaseConfig
 } from '@tibia-idle/database';
-import { createFixedClock } from '@tibia-idle/domain';
+import { createFixedClock, DEFAULT_COMBAT_SIMULATION_CONFIG } from '@tibia-idle/domain';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 function extractCookieToken(setCookieHeader: string | null): string {
@@ -392,6 +392,33 @@ describe('Hunts API Integration, Security, Knight Gate & Idempotency', () => {
       expect(settleJson.rewards.deltaKills).toBeGreaterThan(0);
       expect(settleJson.character.stats.xp).toBeGreaterThan(0);
 
+      // 4b. Idempotency test: Immediately retrying settle with the SAME key (0ms elapsed) MUST replay the real rewards and segmentId
+      const replaySettleRes = await fetch(`${baseUrl}/hunts/${huntId}/settle`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ idempotencyKey: 'slice-settle-real-1' })
+      });
+      expect(replaySettleRes.status).toBe(200);
+      const replaySettleJson = SettleHuntResponseSchema.parse(await replaySettleRes.json());
+      expect(replaySettleJson.idempotentReplay).toBe(true);
+      expect(replaySettleJson.segmentId).toBe(settleJson.segmentId);
+      expect(replaySettleJson.rewards.deltaXpGained).toBe(settleJson.rewards.deltaXpGained);
+      expect(replaySettleJson.rewards.deltaGoldGained).toBe(settleJson.rewards.deltaGoldGained);
+      expect(replaySettleJson.rewards.deltaKills).toBe(settleJson.rewards.deltaKills);
+
+      // 4c. Settle spam guard: Calling settle with a NEW key at 0ms elapsed returns 0 delta rewards with segmentId: null
+      const immediateSpamRes = await fetch(`${baseUrl}/hunts/${huntId}/settle`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ idempotencyKey: 'slice-settle-new-spam-key' })
+      });
+      expect(immediateSpamRes.status).toBe(200);
+      const immediateSpamJson = SettleHuntResponseSchema.parse(await immediateSpamRes.json());
+      expect(immediateSpamJson.idempotentReplay).toBe(true);
+      expect(immediateSpamJson.segmentId).toBeNull();
+      expect(immediateSpamJson.rewards.deltaXpGained).toBe(0);
+      expect(immediateSpamJson.rewards.deltaGoldGained).toBe(0);
+
       // 5. Advance time by another 30 seconds and stop hunt
       currentTime += 30_000;
       const stopRes = await fetch(`${baseUrl}/hunts/${huntId}/stop`, {
@@ -637,6 +664,156 @@ describe('Hunts API Integration, Security, Knight Gate & Idempotency', () => {
         headers: user2Headers
       });
       expect(idorRewards.status).toBe(404);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('handles STOP_CONTINUATION_REQUIRED with partial drain, locks cutoff, blocks second hunt, and completes safely on resume', async () => {
+    let currentTime = 1_700_000_000_000;
+
+    // Build server configured with low maxEventsPerCall and maxDrainSegments=1 to force partial stop
+    const server = buildApiServer({
+      dbPool: pool,
+      clock: {
+        nowMs: () => currentTime,
+        nowIso: () => new Date(currentTime).toISOString()
+      },
+      maxDrainSegments: 1,
+      simulationConfig: {
+        ...DEFAULT_COMBAT_SIMULATION_CONFIG,
+        maxEventsPerCall: 300
+      }
+    });
+    const baseUrl = await server.listen({ host: '127.0.0.1', port: 0 });
+
+    try {
+      // 1. Register & login
+      const regRes = await fetch(`${baseUrl}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'drain-test@example.com',
+          password: 'Password123!',
+          locale: 'en'
+        })
+      });
+      const cookieHeader = extractCookieToken(regRes.headers.get('set-cookie'));
+      const meRes = await fetch(`${baseUrl}/me`, {
+        headers: { Cookie: `${SESSION_COOKIE_NAME}=${cookieHeader}` }
+      });
+      const meJson = SessionMeResponseSchema.parse(await meRes.json());
+      const csrf = meJson.csrfToken;
+      const authHeaders = {
+        'Content-Type': 'application/json',
+        Cookie: `${SESSION_COOKIE_NAME}=${cookieHeader}`,
+        'x-csrf-token': csrf
+      };
+
+      // 2. Create Knight
+      const charRes = await fetch(`${baseUrl}/characters`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ name: 'DrainKnight', vocation: 'knight' })
+      });
+      const knight = CharacterDtoSchema.parse(await charRes.json());
+
+      // 3. Start Hunt in damp-catacombs with 30 HP potions, 15 MP potions
+      const startRes = await fetch(`${baseUrl}/hunts/start`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          characterId: knight.id,
+          zoneId: 'damp-catacombs',
+          strategy: 'safe',
+          hpPotions: 30,
+          mpPotions: 15,
+          idempotencyKey: 'drain-start-key'
+        })
+      });
+      expect(startRes.status).toBe(201);
+      const startJson = StartHuntResponseSchema.parse(await startRes.json());
+      const huntId = startJson.hunt.huntId;
+
+      // 4. Advance clock by 8 hours
+      const eightHoursMs = 8 * 60 * 60 * 1000;
+      currentTime += eightHoursMs;
+
+      // 5. Call stopHunt — since maxDrainSegments=1 and maxEventsPerCall=300, it cannot settle 8h in 1 call
+      const stopRes1 = await fetch(`${baseUrl}/hunts/${huntId}/stop`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ idempotencyKey: 'drain-stop-key-1' })
+      });
+      expect(stopRes1.status).toBe(200);
+      const stopJson1 = StopHuntResponseSchema.parse(await stopRes1.json());
+      expect(stopJson1.status).toBe('STOP_CONTINUATION_REQUIRED');
+      expect(stopJson1.continuationRequired).toBe(true);
+      expect(stopJson1.alreadyCompleted).toBe(false);
+      expect(stopJson1.segmentsSettled).toBe(1);
+      expect(stopJson1.unprocessedDurationMs).toBeGreaterThan(0);
+      expect(stopJson1.hunt.status).toBe('ACTIVE');
+      expect(stopJson1.unusedHpPotionsReturned).toBe(0); // Potions NOT returned yet!
+      expect(stopJson1.unusedMpPotionsReturned).toBe(0);
+
+      // Verify active hunt reports isContinuationRequired = true and stopRequestedAtIso is locked
+      const activeRes = await fetch(`${baseUrl}/hunts/active?characterId=${knight.id}`, {
+        headers: authHeaders
+      });
+      const activeJson = ActiveHuntResponseSchema.parse(await activeRes.json());
+      expect(activeJson.active).toBe(true);
+      expect(activeJson.hunt?.isContinuationRequired).toBe(true);
+      expect(activeJson.hunt?.stopRequestedAtIso).toBe(stopJson1.stopCutoffIso);
+
+      // Starting another hunt MUST be blocked with 409
+      const secondStart = await fetch(`${baseUrl}/hunts/start`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          characterId: knight.id,
+          zoneId: 'damp-catacombs',
+          strategy: 'safe',
+          hpPotions: 0,
+          mpPotions: 0,
+          idempotencyKey: 'blocked-start-key'
+        })
+      });
+      expect(secondStart.status).toBe(409);
+
+      // Re-running stop with a normal drain server completes the remaining duration safely
+      const resumeServer = buildApiServer({
+        dbPool: pool,
+        clock: {
+          nowMs: () => currentTime,
+          nowIso: () => new Date(currentTime).toISOString()
+        },
+        maxDrainSegments: 200 // allow full drain
+      });
+      const resumeBaseUrl = await resumeServer.listen({ host: '127.0.0.1', port: 0 });
+      try {
+        const stopRes2 = await fetch(`${resumeBaseUrl}/hunts/${huntId}/stop`, {
+          method: 'POST',
+          headers: authHeaders,
+          body: JSON.stringify({ idempotencyKey: 'drain-stop-key-2' })
+        });
+        expect(stopRes2.status).toBe(200);
+        const stopJson2 = StopHuntResponseSchema.parse(await stopRes2.json());
+        expect(stopJson2.status).toBe('COMPLETED');
+        expect(stopJson2.continuationRequired).toBe(false);
+        expect(stopJson2.hunt.status).toBe('COMPLETED');
+        expect(stopJson2.unusedHpPotionsReturned).toBeGreaterThanOrEqual(0);
+
+        // After final completion, active hunt is false and latestCompletedHuntId is set
+        const postActiveRes = await fetch(`${resumeBaseUrl}/hunts/active?characterId=${knight.id}`, {
+          headers: authHeaders
+        });
+        const postActiveJson = ActiveHuntResponseSchema.parse(await postActiveRes.json());
+        expect(postActiveJson.active).toBe(false);
+        expect(postActiveJson.hunt).toBeNull();
+        expect(postActiveJson.latestCompletedHuntId).toBe(huntId);
+      } finally {
+        await resumeServer.close();
+      }
     } finally {
       await server.close();
     }

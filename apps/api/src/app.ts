@@ -45,6 +45,7 @@ import {
 } from '@tibia-idle/database';
 import {
   type Clock,
+  type CombatSimulationConfig,
   createSystemClock,
   INITIAL_ZONES_CATALOG,
   MAX_CHARACTERS_PER_ACCOUNT,
@@ -77,6 +78,8 @@ export interface ApiServerOptions {
   huntRateLimitMax?: number;
   huntRateLimitWindowMs?: number;
   forceSecureCookies?: boolean;
+  simulationConfig?: CombatSimulationConfig;
+  maxDrainSegments?: number;
 }
 
 const DUMMY_PASSWORD_HASH_PROMISE = hashPasswordArgon2id('dummy-password-for-timing-defense');
@@ -750,10 +753,17 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
       return sendApiError(reply, request, 404, 'HUNT_NOT_FOUND', 'hunt.notFound');
     }
 
-    // 0ms spam guard: If hunt is active and <1000ms has elapsed since settledUntil, return no-op SETTLED
+    // Check first whether this idempotency key was ALREADY committed in hunt_segments
+    // If it was already committed, delegate directly to settleHunt so it replays the canonical rewards and segmentId
+    const priorSegmentCheck = await pool.query<{ id: string }>(
+      `SELECT id FROM hunt_segments WHERE hunt_id = $1 AND segment_key = $2 LIMIT 1`,
+      [existingHunt.huntId, parsed.data.idempotencyKey]
+    );
+
+    // 0ms spam guard: For a NEW key, if hunt is active and <1000ms has elapsed since settledUntil, return no-op SETTLED
     const nowMs = clock.nowMs();
     const settledUntilMs = new Date(existingHunt.settledUntilIso).getTime();
-    if (existingHunt.status === 'ACTIVE' && nowMs - settledUntilMs < 1000) {
+    if (priorSegmentCheck.rows.length === 0 && existingHunt.status === 'ACTIVE' && nowMs - settledUntilMs < 1000) {
       const char = await findCharacterByIdForUser(
         pool,
         existingHunt.characterId,
@@ -802,7 +812,8 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
       characterId: existingHunt.characterId,
       userId: resolved.session.userId,
       segmentKey: parsed.data.idempotencyKey,
-      clock
+      clock,
+      config: options.simulationConfig
     });
 
     if (!settleResult.ok) {
@@ -861,7 +872,9 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
       userId: resolved.session.userId,
       stopIdempotencyKey: parsed.data.idempotencyKey,
       settleBeforeStop: true,
-      clock
+      clock,
+      config: options.simulationConfig,
+      maxDrainSegments: options.maxDrainSegments
     });
 
     if (!stopResult.ok) {

@@ -25,7 +25,7 @@ import {
   t,
   type TranslationKey
 } from '@tibia-idle/i18n';
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GameIcon } from './assets/assetRegistry.js';
 import { BestiaryView } from './components/BestiaryView.js';
 import { CharacterView } from './components/CharacterView.js';
@@ -57,15 +57,6 @@ import {
 const SESSION_STORAGE_AUTH_FLAG = 'tibia_idle_has_session';
 const SESSION_STORAGE_CHAR_KEY = 'tibia_idle_ui_char_id';
 const SESSION_STORAGE_TAB_KEY = 'tibia_idle_ui_tab_id';
-
-function hasActiveSessionHint(): boolean {
-  if (typeof window === 'undefined' || !window.sessionStorage) return false;
-  try {
-    return window.sessionStorage.getItem(SESSION_STORAGE_AUTH_FLAG) === '1';
-  } catch {
-    return false;
-  }
-}
 
 function readSessionUiState(): { charId: string | null; tab: GameTabId } {
   if (typeof window === 'undefined' || !window.sessionStorage) {
@@ -168,8 +159,12 @@ export function App({
   const [activeHuntLoading, setActiveHuntLoading] = useState<boolean>(false);
   const [huntActionLoading, setHuntActionLoading] = useState<boolean>(false);
   const [huntReport, setHuntReport] = useState<HuntSegmentsResponseDto | null>(null);
+  const [latestCompletedHuntId, setLatestCompletedHuntId] = useState<string | null>(null);
   const [rewardItems, setRewardItems] = useState<readonly CharacterHuntRewardItemDto[]>([]);
   const [dynamicLogEntries, setDynamicLogEntries] = useState<GameLogEntry[]>([]);
+
+  const pendingSettleKeyRef = useRef<string | null>(null);
+  const pendingStopKeyRef = useRef<string | null>(null);
 
   const activeCharacter = characters.find((c) => c.id === selectedCharacterId) ?? null;
 
@@ -219,10 +214,11 @@ export function App({
 
       if (restoreUiSelection) {
         const saved = readSessionUiState();
-        const foundChar = payload.characters.find((c) => c.id === saved.charId);
+        const foundChar =
+          payload.characters.find((c) => c.id === saved.charId) ?? payload.characters[0] ?? null;
         if (foundChar) {
           setSelectedCharacterId(foundChar.id);
-          setActiveTab(saved.tab);
+          setActiveTab(saved.charId ? saved.tab : 'dashboard');
         }
       } else {
         writeSessionUiState(null, 'dashboard');
@@ -233,7 +229,7 @@ export function App({
   );
 
   useEffect(() => {
-    if (initialUser || !hasActiveSessionHint()) return;
+    if (initialUser) return;
     let cancelled = false;
     const checkExistingSession = async () => {
       try {
@@ -401,6 +397,7 @@ export function App({
         if (res.ok) {
           const data = (await res.json()) as ActiveHuntResponseDto;
           setActiveHunt(data.hunt);
+          setLatestCompletedHuntId(data.latestCompletedHuntId);
           return data;
         }
       } catch {
@@ -431,9 +428,29 @@ export function App({
     [apiBaseUrl]
   );
 
+  const handleOpenLatestReport = useCallback(async () => {
+    if (!latestCompletedHuntId) return;
+    setHuntActionLoading(true);
+    try {
+      const repRes = await fetch(`${apiBaseUrl}/hunts/${latestCompletedHuntId}/segments`, {
+        method: 'GET',
+        credentials: 'include'
+      });
+      if (repRes.ok) {
+        const repData = (await repRes.json()) as HuntSegmentsResponseDto;
+        setHuntReport(repData);
+      }
+    } catch {
+      setErrorKey('common.error');
+    } finally {
+      setHuntActionLoading(false);
+    }
+  }, [apiBaseUrl, latestCompletedHuntId]);
+
   useEffect(() => {
     if (!activeCharacter) {
       setActiveHunt(null);
+      setLatestCompletedHuntId(null);
       setRewardItems([]);
       return;
     }
@@ -519,6 +536,9 @@ export function App({
     setHuntActionLoading(true);
     setErrorKey(null);
     try {
+      const key = pendingSettleKeyRef.current || generateClientUUID();
+      pendingSettleKeyRef.current = key;
+
       const res = await fetch(`${apiBaseUrl}/hunts/${activeHunt.huntId}/settle`, {
         method: 'POST',
         credentials: 'include',
@@ -527,7 +547,7 @@ export function App({
           'x-csrf-token': csrfToken
         },
         body: JSON.stringify({
-          idempotencyKey: generateClientUUID()
+          idempotencyKey: key
         })
       });
 
@@ -539,6 +559,9 @@ export function App({
         return;
       }
 
+      // Settled successfully — clear pending idempotency key
+      pendingSettleKeyRef.current = null;
+
       const data = (await res.json()) as SettleHuntResponseDto;
       setCharacters((prev) =>
         prev.map((c) => (c.id === data.character.id ? data.character : c))
@@ -546,20 +569,28 @@ export function App({
       await fetchActiveHunt(activeCharacter.id);
       await fetchRewardItems(activeCharacter.id);
 
-      const nowTime = new Date().toLocaleTimeString(locale === 'pl' ? 'pl-PL' : 'en-US', {
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-      setDynamicLogEntries((prev) => [
-        ...prev,
-        {
-          id: `hunt-settle-${Date.now()}`,
-          time: nowTime,
-          channel: 'hunt',
-          tone: 'info',
-          text: `${t(locale, 'hunt.logSettled')} (+${data.rewards.deltaXpGained} XP, +${data.rewards.deltaGoldGained} G, ${data.rewards.deltaKills} kills)`
-        }
-      ]);
+      // Only log if real rewards were gained to avoid duplicate entries on zero-delta replay
+      if (
+        !data.idempotentReplay ||
+        data.rewards.deltaXpGained > 0 ||
+        data.rewards.deltaGoldGained > 0 ||
+        data.rewards.deltaKills > 0
+      ) {
+        const nowTime = new Date().toLocaleTimeString(locale === 'pl' ? 'pl-PL' : 'en-US', {
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+        setDynamicLogEntries((prev) => [
+          ...prev,
+          {
+            id: `hunt-settle-${Date.now()}`,
+            time: nowTime,
+            channel: 'hunt',
+            tone: 'info',
+            text: `${t(locale, 'hunt.logSettled')} (+${data.rewards.deltaXpGained} XP, +${data.rewards.deltaGoldGained} G, ${data.rewards.deltaKills} kills)`
+          }
+        ]);
+      }
     } catch {
       setErrorKey('common.error');
     } finally {
@@ -573,6 +604,9 @@ export function App({
     setErrorKey(null);
     try {
       const huntId = activeHunt.huntId;
+      const key = pendingStopKeyRef.current || generateClientUUID();
+      pendingStopKeyRef.current = key;
+
       const res = await fetch(`${apiBaseUrl}/hunts/${huntId}/stop`, {
         method: 'POST',
         credentials: 'include',
@@ -581,7 +615,7 @@ export function App({
           'x-csrf-token': csrfToken
         },
         body: JSON.stringify({
-          idempotencyKey: generateClientUUID()
+          idempotencyKey: key
         })
       });
 
@@ -593,11 +627,37 @@ export function App({
         return;
       }
 
+      // Processed response from server — clear pending idempotency key
+      pendingStopKeyRef.current = null;
+
       const data = (await res.json()) as StopHuntResponseDto;
       setCharacters((prev) =>
         prev.map((c) => (c.id === data.character.id ? data.character : c))
       );
+
+      if (data.status === 'STOP_CONTINUATION_REQUIRED' || data.continuationRequired) {
+        // P0: Do NOT clear active hunt; do NOT open completed report; show stopping in progress
+        await fetchActiveHunt(activeCharacter.id);
+        const nowTime = new Date().toLocaleTimeString(locale === 'pl' ? 'pl-PL' : 'en-US', {
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+        setDynamicLogEntries((prev) => [
+          ...prev,
+          {
+            id: `hunt-stopping-${Date.now()}`,
+            time: nowTime,
+            channel: 'hunt',
+            tone: 'info',
+            text: t(locale, 'hunt.stoppingInProgress')
+          }
+        ]);
+        return;
+      }
+
+      // Final stop succeeded (COMPLETED or ALREADY_COMPLETED)
       setActiveHunt(null);
+      setLatestCompletedHuntId(huntId);
 
       // Fetch summary segments for report window
       const repRes = await fetch(`${apiBaseUrl}/hunts/${huntId}/segments`, {
@@ -1051,6 +1111,8 @@ export function App({
                   onRefreshRewardItems={() =>
                     activeCharacter ? fetchRewardItems(activeCharacter.id) : Promise.resolve()
                   }
+                  latestCompletedHuntId={latestCompletedHuntId}
+                  onOpenLatestReport={handleOpenLatestReport}
                 />
               ) : activeTab === 'character' ? (
                 <CharacterView locale={locale} character={activeCharacter} />

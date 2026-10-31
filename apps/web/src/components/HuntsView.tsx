@@ -52,6 +52,8 @@ export interface HuntsViewProps {
   onCloseHuntReport: () => void;
   rewardItems: readonly CharacterHuntRewardItemDto[];
   onRefreshRewardItems: () => Promise<void>;
+  latestCompletedHuntId?: string | null;
+  onOpenLatestReport?: () => Promise<void>;
 }
 
 export function HuntsView({
@@ -69,7 +71,9 @@ export function HuntsView({
   huntActionLoading,
   huntReport,
   onCloseHuntReport,
-  rewardItems
+  rewardItems,
+  latestCompletedHuntId,
+  onOpenLatestReport
 }: HuntsViewProps) {
   const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
   const [selectedStrategy, setSelectedStrategy] = useState<HuntStrategyDto>('balanced');
@@ -109,8 +113,11 @@ export function HuntsView({
   // Determine active hunt live durations
   const huntStartedAtMs = activeHunt ? new Date(activeHunt.startedAtIso).getTime() : 0;
   const huntSettledUntilMs = activeHunt ? new Date(activeHunt.settledUntilIso).getTime() : 0;
-  const liveElapsedMs = activeHunt ? Math.max(0, nowMs - huntStartedAtMs) : 0;
-  const liveUnsettledMs = activeHunt ? Math.max(0, nowMs - huntSettledUntilMs) : 0;
+  const effectiveCutoffMs = activeHunt?.stopRequestedAtIso
+    ? new Date(activeHunt.stopRequestedAtIso).getTime()
+    : nowMs;
+  const liveElapsedMs = activeHunt ? Math.max(0, effectiveCutoffMs - huntStartedAtMs) : 0;
+  const liveUnsettledMs = activeHunt ? Math.max(0, effectiveCutoffMs - huntSettledUntilMs) : 0;
 
   const canStartHunt =
     !activeHunt &&
@@ -264,7 +271,10 @@ export function HuntsView({
             {/* Continuation warning if server stopped under low budget */}
             {activeHunt.isContinuationRequired && (
               <div role="alert" className="game-alert-box" data-testid="continuation-required-alert">
-                <span>{t(locale, 'hunt.statusContinuation')}</span>
+                <span>
+                  {t(locale, 'hunt.stoppingInProgress')} ({formatDuration(liveUnsettledMs)}{' '}
+                  {t(locale, 'hunt.unsettledRemaining').toLowerCase()})
+                </span>
               </div>
             )}
 
@@ -286,11 +296,28 @@ export function HuntsView({
                 disabled={huntActionLoading}
                 onClick={onStopHunt}
               >
-                {t(locale, 'hunt.stopHunt')}
+                {activeHunt.isContinuationRequired
+                  ? t(locale, 'hunt.continueStop')
+                  : t(locale, 'hunt.stopHunt')}
               </GameButton>
             </div>
           </div>
         </GameWindow>
+      )}
+
+      {/* Persistent Hunt Report trigger button if not hunting and previous report exists */}
+      {!activeHunt && latestCompletedHuntId && onOpenLatestReport && (
+        <div className="latest-report-action-strip" style={{ marginBottom: '8px' }}>
+          <GameButton
+            variant="default"
+            size="md"
+            testId="open-latest-report-button"
+            disabled={huntActionLoading}
+            onClick={onOpenLatestReport}
+          >
+            {t(locale, 'hunt.lastHunt')}
+          </GameButton>
+        </div>
       )}
 
       {/* 2. Hunt Report Window (displayed after hunt stops/completes) */}
