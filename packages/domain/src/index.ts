@@ -458,3 +458,6 @@ export function createSeededRng(seed: number): DeterministicRng {
     nextInt
   };
 }
+
+export * from './combat/index.js';
+
