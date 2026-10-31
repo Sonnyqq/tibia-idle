@@ -265,6 +265,17 @@ export const VALID_CATALOG_ITEM_IDS: ReadonlySet<string> = new Set(
   )
 );
 
+export const CATALOG_ITEMS_MAP: ReadonlyMap<
+  string,
+  (typeof INITIAL_ZONES_CATALOG)[number]['creatures'][number]['lootPreview'][number]
+> = new Map(
+  INITIAL_ZONES_CATALOG.flatMap((zone) =>
+    zone.creatures.flatMap((creature) =>
+      creature.lootPreview.map((item) => [item.id, item] as const)
+    )
+  )
+);
+
 export const VITALS_PER_LEVEL_CONFIG: Readonly<
   Record<VocationDto, { readonly hpPerLevel: number; readonly mpPerLevel: number }>
 > = {

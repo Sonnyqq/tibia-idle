@@ -1,4 +1,4 @@
-import { type CharacterDto } from '@tibia-idle/contracts';
+import { type ActiveHuntDto, type CharacterDto } from '@tibia-idle/contracts';
 import { type SupportedLocale, t } from '@tibia-idle/i18n';
 import { GameIcon } from '../assets/assetRegistry.js';
 import {
@@ -13,6 +13,7 @@ import { GameButton, GameWindow, ProgressBar, StatRow } from './ui/GameUi.js';
 export interface DashboardViewProps {
   locale: SupportedLocale;
   character: CharacterDto;
+  activeHunt?: ActiveHuntDto | null;
   onNavigateTab: (tab: GameTabId) => void;
   onSwitchCharacter: () => void;
 }
@@ -20,6 +21,7 @@ export interface DashboardViewProps {
 export function DashboardView({
   locale,
   character,
+  activeHunt,
   onNavigateTab,
   onSwitchCharacter
 }: DashboardViewProps) {
@@ -163,13 +165,22 @@ export function DashboardView({
             <StatRow
               label={t(locale, 'dashboard.activityTitle')}
               value={
-                <span data-testid="dashboard-activity-status">{t(locale, 'dashboard.idleStatus')}</span>
+                <span data-testid="dashboard-activity-status">
+                  {activeHunt
+                    ? `${t(locale, 'hunt.statusActive')} — ${activeHunt.zoneId}`
+                    : t(locale, 'dashboard.idleStatus')}
+                </span>
               }
             />
             <StatRow
               label={t(locale, 'nav.hunts')}
-              value={t(locale, 'status.enginePending')}
-              muted
+              value={
+                activeHunt
+                  ? `${activeHunt.totalKills} ${t(locale, 'hunt.summaryKills').toLowerCase()} • +${activeHunt.totalXpGained} XP`
+                  : t(locale, 'status.online')
+              }
+              muted={!activeHunt}
+              highlight={Boolean(activeHunt)}
             />
           </dl>
           <div className="window-action-strip">

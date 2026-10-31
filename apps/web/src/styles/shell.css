@@ -1366,6 +1366,259 @@ body {
   white-space: nowrap;
 }
 
+/* ==========================================
+   ACTIVE HUNT, STRATEGY, REPORT & REWARD INBOX
+   ========================================== */
+.active-hunt-content,
+.hunt-report-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.active-hunt-header-banner,
+.report-summary-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background-color: var(--game-panel-dark);
+  border: 1px solid var(--game-border);
+}
+
+.active-hunt-zone-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.active-hunt-time-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.time-stat-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  background-color: var(--game-inset);
+  border: 1px solid #4d4f48;
+  font-size: 11px;
+}
+
+.time-stat-label {
+  color: var(--text-muted);
+}
+
+.time-stat-val {
+  color: var(--text-heading);
+}
+
+.active-hunt-vitals-box {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 6px;
+  padding: 6px 8px;
+  background-color: var(--game-panel-dark);
+  border: 1px solid var(--game-border);
+}
+
+.vitals-bar-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.vitals-bar-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.active-hunt-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 4px;
+  margin: 0;
+}
+
+.stat-grid-cell {
+  background-color: var(--game-inset);
+  border: 1px solid var(--game-border);
+  padding: 4px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stat-grid-cell dt {
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.stat-grid-cell dd {
+  margin: 0;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-heading);
+}
+
+.active-hunt-loot-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  background-color: var(--game-panel-dark);
+  border: 1px solid var(--game-border);
+}
+
+.hunt-loot-token {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background-color: var(--game-inset);
+  border: 1px solid var(--game-border);
+  padding: 2px 4px;
+}
+
+.loot-token-count {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--gold);
+}
+
+.active-hunt-action-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.hunt-strategy-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.strategy-option-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 8px;
+  background-color: var(--game-panel-dark);
+  border: 1px solid var(--game-border);
+  cursor: pointer;
+  user-select: none;
+}
+
+.strategy-option-card.is-selected {
+  border-color: var(--text-heading);
+  background-color: #383a33;
+}
+
+.strategy-option-card input[type='radio'] {
+  margin-top: 3px;
+  cursor: pointer;
+}
+
+.strategy-option-details {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.strategy-title {
+  font-size: 12px;
+  color: var(--text-heading);
+}
+
+.strategy-desc {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.hunt-potion-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 6px;
+}
+
+.potion-input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.potion-input-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.hunt-start-action-row {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.reward-inbox-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.reward-inbox-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 6px;
+}
+
+.reward-inbox-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  background-color: var(--game-panel-dark);
+  border: 1px solid var(--game-border);
+}
+
+.reward-item-details {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.reward-item-name {
+  font-size: 11.5px;
+  color: var(--text-heading);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.reward-item-badges {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.game-tag-unclaimed {
+  background-color: #2e3b2e;
+  border-color: #436b43;
+  color: #a8dfa8;
+}
+
 @media (max-width: 1180px) {
   .game-workspace {
     grid-template-columns: 200px minmax(0, 1fr);

@@ -1,6 +1,11 @@
 import { type CharacterDto, type UserDto } from '@tibia-idle/contracts';
 import { INITIAL_ZONES_CATALOG } from '@tibia-idle/domain';
-import { App } from '@tibia-idle/web/App.js';
+import {
+  App,
+  clearPendingHuntKey,
+  getPendingHuntKey,
+  setPendingHuntKey
+} from '@tibia-idle/web/App.js';
 import { inferAssetCategory, resolveAssetSource } from '@tibia-idle/web/assets/assetRegistry.js';
 import {
   GameButton,
@@ -49,6 +54,8 @@ const sampleChar: CharacterDto = {
     magic: 1,
     shielding: 15
   },
+  hpPotions: 250,
+  mpPotions: 150,
   createdAt: '2026-10-30T20:00:00.000Z'
 };
 
@@ -200,8 +207,8 @@ describe('@tibia-idle/web unit tests (Tibia client components, navigation, asset
     expect(huntsEn).toContain('Damp Catacombs');
     expect(huntsEn).toContain('Sunken Crypts');
     expect(huntsEn).toContain('Ashwind Ridge');
-    expect(huntsEn).toContain('Pending P02 simulation');
-    expect(huntsEn).toContain('Hunt execution unlocks in IDLE-004');
+    expect(huntsEn).toContain('Start hunt');
+    expect(huntsEn).toContain('AFK Reward Inbox');
 
     const huntsEmptyEn = renderToStaticMarkup(
       <App
@@ -256,5 +263,49 @@ describe('@tibia-idle/web unit tests (Tibia client components, navigation, asset
     expect(bestiaryPl).toContain('Bestiariusz i wiedza o potworach');
     expect(bestiaryPl).toContain('Piwniczny Prześladowca');
     expect(bestiaryPl).toContain('Próg zablokowany (0 / 100 zabójstw)');
+  });
+
+  it('manages character- and hunt-isolated pending operation idempotency keys across session storage', () => {
+    // Clear mock storage
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      window.sessionStorage.clear();
+    }
+
+    const char1 = '00000000-0000-0000-0000-000000000001';
+    const char2 = '00000000-0000-0000-0000-000000000002';
+    const hunt1 = '11111111-1111-1111-1111-111111111111';
+    const hunt2 = '22222222-2222-2222-2222-222222222222';
+
+    // 1. Initial lookup is null
+    expect(getPendingHuntKey(char1, 'start')).toBeNull();
+    expect(getPendingHuntKey(char1, 'settle', hunt1)).toBeNull();
+
+    // 2. Setting key for char1 does not bleed to char2 or different operations
+    setPendingHuntKey(char1, 'start', 'start-key-char1');
+    setPendingHuntKey(char1, 'settle', 'settle-key-hunt1', hunt1);
+    setPendingHuntKey(char1, 'stop', 'stop-key-hunt1', hunt1);
+
+    expect(getPendingHuntKey(char1, 'start')).toBe('start-key-char1');
+    expect(getPendingHuntKey(char1, 'settle', hunt1)).toBe('settle-key-hunt1');
+    expect(getPendingHuntKey(char1, 'stop', hunt1)).toBe('stop-key-hunt1');
+
+    // Char2 isolation
+    expect(getPendingHuntKey(char2, 'start')).toBeNull();
+    expect(getPendingHuntKey(char2, 'settle', hunt1)).toBeNull();
+
+    // Hunt2 isolation
+    expect(getPendingHuntKey(char1, 'settle', hunt2)).toBeNull();
+
+    // 3. Selective clearing preserves other keys
+    clearPendingHuntKey(char1, 'settle', hunt1);
+    expect(getPendingHuntKey(char1, 'settle', hunt1)).toBeNull();
+    expect(getPendingHuntKey(char1, 'start')).toBe('start-key-char1');
+    expect(getPendingHuntKey(char1, 'stop', hunt1)).toBe('stop-key-hunt1');
+
+    // 4. Clean up
+    clearPendingHuntKey(char1, 'start');
+    clearPendingHuntKey(char1, 'stop', hunt1);
+    expect(getPendingHuntKey(char1, 'start')).toBeNull();
+    expect(getPendingHuntKey(char1, 'stop', hunt1)).toBeNull();
   });
 });

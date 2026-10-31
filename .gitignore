@@ -10,5 +10,6 @@ test-results/
 *.log
 *.db
 *.sqlite
+pgdata/
 .DS_Store
 CLAUDE.local.md

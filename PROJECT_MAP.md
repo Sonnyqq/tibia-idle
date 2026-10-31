@@ -12,14 +12,14 @@
 | Locales & i18n | `packages/i18n/` | EXISTS (PL/EN auth, characters, 5-screen game shell, zones/bestiary) | `tests/tooling/i18n.test.mjs` | none |
 | Documentation checks | `scripts/check-docs.mjs` | EXISTS | `tests/tooling/guardrails.test.mjs` | CI |
 | Architecture boundaries | `tests/tooling/boundaries.test.mjs` | EXISTS | `tsconfig.base.json` | CI |
-| Web UI | `apps/web/` | EXISTS (responsive PC/mobile shell: Dashboard, Hunts, Character, Inventory, Bestiary + SVG asset registry) | game design: UI | contracts/i18n |
-| API/auth | `apps/api/` | EXISTS (Argon2id auth, HttpOnly sessions, CSRF, characters, read-only `/zones` catalog) | architecture: auth/API | domain/db/contracts/i18n |
+| Web UI | `apps/web/` | EXISTS (responsive PC/mobile shell: Dashboard, playable Hunts with active hunt/settle/stop/report/inbox, Character, Inventory, Bestiary + SVG asset registry) | game design: UI | contracts/i18n |
+| API/auth | `apps/api/` | EXISTS (Argon2id auth, HttpOnly sessions, CSRF, characters, `/zones`, `/hunts/start`, `/hunts/active`, `/hunts/:id`, `/hunts/:id/settle`, `/hunts/:id/stop`, `/hunts/:id/segments`, `/characters/:id/hunt-rewards`) | architecture: auth/API | domain/db/contracts/i18n |
 | Domain engine | `packages/domain/` | EXISTS (vocation stats, XP/level progress, catalog, deterministic Knight combat simulator `src/combat/`) | game design: hunts | contracts |
 | Database/migrations | `packages/database/` | EXISTS (`0001`–`0003` migrations, `auth-repository.ts`, `hunt-repository.ts` persistent hunts/segments/rewards/ledger) | data model | domain/contracts |
-| DTO/contracts | `packages/contracts/` | EXISTS (auth, session, character, zone/creature/loot catalog & equipment slot schemas) | architecture: API | i18n |
+| DTO/contracts | `packages/contracts/` | EXISTS (auth, session, character, zone/creature/loot catalog & equipment slot schemas, v0.4.0 hunt/settle/stop/segments/rewards DTOs) | architecture: API | i18n |
 | Unit tests | `tests/unit/` | EXISTS (domain, combat engine + property tests, contracts, security, db, web 5-screen SSR, i18n) | `vitest.unit.config.ts` | packages/web/api |
-| Backend integration | `tests/integration/` | EXISTS (API, Postgres migrations `0001`–`0003`, auth/security/race, `/zones`, persistent hunts/settlement/fault-injection/DB perf) | `vitest.integration.config.ts` | api/db |
-| Browser E2E | `tests/e2e/` | EXISTS (5 screens, PC/mobile 320/390/768/1280/1440px, PL/EN switch, F5 reload, auth) | `playwright.config.ts` | web/api/db |
+| Backend integration | `tests/integration/` | EXISTS (API, Postgres migrations `0001`–`0003`, auth/security/race, `/zones`, persistent hunts/settlement/fault-injection/DB perf, `/hunts/*` endpoints) | `vitest.integration.config.ts` | api/db |
+| Browser E2E | `tests/e2e/` | EXISTS (5 screens, PC/mobile 320/390/768/1280/1440px, PL/EN switch, F5 reload, auth, full playable AFK hunt flow) | `playwright.config.ts` | web/api/db |
 | Load and recovery | `tests/perf/` | EXISTS (`combat.bench.test.ts` domain 100/1000/24h; `tests/integration/hunts.perf.integration.test.ts` DB 100/1000 & race) | test strategy | api/db/domain |
 | Licensed art registry | `assets/` | EXISTS (rules only) | `docs/LEGAL_ASSETS.md` | web |
 | CI verification | `.github/workflows/verify.yml` | EXISTS | `docs/TEST_STRATEGY.md` | all tests |
