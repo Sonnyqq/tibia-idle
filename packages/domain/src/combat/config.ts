@@ -3,6 +3,7 @@ import {
   type CombatResourceLoadout,
   type CombatSimulationConfig,
   HUNT_STRATEGIES,
+  type HuntConfigurationSnapshot,
   type KnightEquipmentLoadout,
   type MonsterCombatConfig,
   type StrategyProfileConfig,
@@ -12,6 +13,14 @@ import {
 export const COMBAT_SIMULATION_VERSION = '1.0.0' as const;
 export const MAX_OFFLINE_DURATION_MS = 86_400_000 as const; // 24 hours in ms
 export const DEFAULT_MAX_EVENTS_PER_CALL = 500_000 as const;
+
+export const MAX_POTION_STACK_COUNT = 1_000_000 as const;
+export const MIN_POTION_HEAL_AMOUNT = 1 as const;
+export const MAX_POTION_HEAL_AMOUNT = 1_000_000 as const;
+export const MAX_POTION_UNIT_COST_GOLD = 1_000_000 as const;
+export const MAX_CHARACTER_LEVEL = 10_000 as const;
+export const MAX_CHARACTER_STAT = 1_000_000 as const;
+export const MAX_CHARACTER_VITAL = 10_000_000 as const;
 
 export const DEFAULT_KNIGHT_EQUIPMENT: KnightEquipmentLoadout = {
   weaponAttack: 18,
@@ -309,13 +318,60 @@ export const DEFAULT_COMBAT_SIMULATION_CONFIG: CombatSimulationConfig = {
   monsters: DEFAULT_MONSTERS_COMBAT_CONFIG
 } as const;
 
+export function validateCombatResources(resources: CombatResourceLoadout): void {
+  if (typeof resources !== 'object' || resources === null) {
+    throw new RangeError('CombatResourceLoadout must be a non-null object');
+  }
+  if (
+    !Number.isSafeInteger(resources.hpPotions) ||
+    resources.hpPotions < 0 ||
+    resources.hpPotions > MAX_POTION_STACK_COUNT ||
+    !Number.isSafeInteger(resources.mpPotions) ||
+    resources.mpPotions < 0 ||
+    resources.mpPotions > MAX_POTION_STACK_COUNT
+  ) {
+    throw new RangeError(
+      `Potion counts must be safe integers in [0, ${MAX_POTION_STACK_COUNT}]`
+    );
+  }
+  if (
+    !Number.isSafeInteger(resources.hpPotionHealAmount) ||
+    resources.hpPotionHealAmount < MIN_POTION_HEAL_AMOUNT ||
+    resources.hpPotionHealAmount > MAX_POTION_HEAL_AMOUNT ||
+    !Number.isSafeInteger(resources.mpPotionRestoreAmount) ||
+    resources.mpPotionRestoreAmount < MIN_POTION_HEAL_AMOUNT ||
+    resources.mpPotionRestoreAmount > MAX_POTION_HEAL_AMOUNT
+  ) {
+    throw new RangeError(
+      `Potion heal/restore amounts must be safe integers in [${MIN_POTION_HEAL_AMOUNT}, ${MAX_POTION_HEAL_AMOUNT}]`
+    );
+  }
+  if (
+    !Number.isSafeInteger(resources.hpPotionUnitCostGold) ||
+    resources.hpPotionUnitCostGold < 0 ||
+    resources.hpPotionUnitCostGold > MAX_POTION_UNIT_COST_GOLD ||
+    !Number.isSafeInteger(resources.mpPotionUnitCostGold) ||
+    resources.mpPotionUnitCostGold < 0 ||
+    resources.mpPotionUnitCostGold > MAX_POTION_UNIT_COST_GOLD ||
+    !Number.isSafeInteger(
+      resources.hpPotions * resources.hpPotionUnitCostGold +
+        resources.mpPotions * resources.mpPotionUnitCostGold
+    )
+  ) {
+    throw new RangeError(
+      `Potion unit costs must be safe integers in [0, ${MAX_POTION_UNIT_COST_GOLD}] without total cost overflow`
+    );
+  }
+}
+
 export function validateCombatConfig(config: CombatSimulationConfig): void {
-  if (!config.version || typeof config.version !== 'string') {
+  if (!config || !config.version || typeof config.version !== 'string') {
     throw new RangeError('CombatSimulationConfig.version must be a non-empty string');
   }
   if (
     !Number.isSafeInteger(config.maxOfflineDurationMs) ||
     config.maxOfflineDurationMs <= 0 ||
+    config.maxOfflineDurationMs > MAX_OFFLINE_DURATION_MS * 7 ||
     !Number.isSafeInteger(config.maxEventsPerCall) ||
     config.maxEventsPerCall <= 0 ||
     !Number.isSafeInteger(config.playerAttackIntervalMs) ||
@@ -324,8 +380,10 @@ export function validateCombatConfig(config: CombatSimulationConfig): void {
     config.passiveRegenIntervalMs < 500 ||
     !Number.isSafeInteger(config.passiveHpRegenAmount) ||
     config.passiveHpRegenAmount < 0 ||
+    config.passiveHpRegenAmount > MAX_CHARACTER_VITAL ||
     !Number.isSafeInteger(config.passiveMpRegenAmount) ||
-    config.passiveMpRegenAmount < 0
+    config.passiveMpRegenAmount < 0 ||
+    config.passiveMpRegenAmount > MAX_CHARACTER_VITAL
   ) {
     throw new RangeError('Invalid simulation timing or regeneration bounds in CombatSimulationConfig');
   }
@@ -334,15 +392,29 @@ export function validateCombatConfig(config: CombatSimulationConfig): void {
     const strat = config.strategies[strategyId];
     if (
       !strat ||
+      strat.id !== strategyId ||
+      typeof strat.useBrutalStrike !== 'boolean' ||
+      !Number.isSafeInteger(strat.attackFactorPermille) ||
       strat.attackFactorPermille <= 0 ||
+      strat.attackFactorPermille > 10_000 ||
+      !Number.isSafeInteger(strat.defenseFactorPermille) ||
       strat.defenseFactorPermille <= 0 ||
+      strat.defenseFactorPermille > 10_000 ||
+      !Number.isSafeInteger(strat.hpPotionThresholdPermille) ||
       strat.hpPotionThresholdPermille < 0 ||
       strat.hpPotionThresholdPermille > 1000 ||
+      !Number.isSafeInteger(strat.mpPotionThresholdPermille) ||
       strat.mpPotionThresholdPermille < 0 ||
       strat.mpPotionThresholdPermille > 1000 ||
+      !Number.isSafeInteger(strat.stopWhenOutOfHpPotionsBelowPermille) ||
       strat.stopWhenOutOfHpPotionsBelowPermille < 0 ||
       strat.stopWhenOutOfHpPotionsBelowPermille > 1000 ||
-      strat.brutalStrikeManaCost < 0
+      !Number.isSafeInteger(strat.brutalStrikeManaCost) ||
+      strat.brutalStrikeManaCost < 0 ||
+      strat.brutalStrikeManaCost > MAX_CHARACTER_VITAL ||
+      !Number.isSafeInteger(strat.brutalStrikeBonusPermille) ||
+      strat.brutalStrikeBonusPermille < 1000 ||
+      strat.brutalStrikeBonusPermille > 10_000
     ) {
       throw new RangeError(`Invalid strategy configuration for '${strategyId}'`);
     }
@@ -355,6 +427,9 @@ export function validateCombatConfig(config: CombatSimulationConfig): void {
 
   for (const zone of zonesList) {
     if (
+      !zone.id ||
+      !Number.isSafeInteger(zone.minLevel) ||
+      zone.minLevel < 1 ||
       !Number.isSafeInteger(zone.searchCooldownMs) ||
       zone.searchCooldownMs < 100 ||
       zone.monsterIds.length === 0
@@ -416,6 +491,52 @@ export function validateCombatConfig(config: CombatSimulationConfig): void {
       throw new RangeError(`Zone '${zone.id}' must have positive total monster spawnWeight`);
     }
   }
+}
+
+/**
+ * Deterministic 64-bit (dual 32-bit FNV-1a) fingerprint over canonical JSON.
+ * Environment-independent (works identically across Node.js, V8, and browsers).
+ */
+export function computeDeterministicDigest(canonicalPayload: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < canonicalPayload.length; i += 1) {
+    const code = canonicalPayload.charCodeAt(i);
+    h1 ^= code;
+    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    h2 ^= code ^ ((i & 0xff) + 1);
+    h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
+  }
+  return `v1:${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
+}
+
+export function computeHuntSnapshotDigest(
+  snapshot: Omit<HuntConfigurationSnapshot, 'configDigest'>
+): string {
+  const canonical = JSON.stringify({
+    simulationVersion: snapshot.simulationVersion,
+    zoneId: snapshot.zoneId,
+    strategy: snapshot.strategy,
+    timings: snapshot.timings,
+    strategyProfile: snapshot.strategyProfile,
+    zone: snapshot.zone,
+    monsters: snapshot.monsters,
+    character: snapshot.character,
+    resources: snapshot.resources
+  });
+  return computeDeterministicDigest(canonical);
+}
+
+export function deepFreeze<T>(value: T): Readonly<T> {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const prop of Object.values(value as Record<string, unknown>)) {
+      if (prop !== null && typeof prop === 'object') {
+        deepFreeze(prop);
+      }
+    }
+  }
+  return value;
 }
 
 export function assertCatalogAlignmentWithCombatConfig(

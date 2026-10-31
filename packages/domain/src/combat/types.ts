@@ -5,6 +5,7 @@ export type HuntStrategy = (typeof HUNT_STRATEGIES)[number];
 
 export const HUNT_STOP_REASONS = [
   'TIME_REACHED',
+  'EVENT_BUDGET_EXHAUSTED',
   'MAX_OFFLINE_CAP_REACHED',
   'CHARACTER_DIED',
   'OUT_OF_HP_POTIONS_CRITICAL',
@@ -109,6 +110,32 @@ export interface CombatSimulationConfig {
   readonly monsters: Readonly<Record<string, MonsterCombatConfig>>;
 }
 
+export interface HuntTimingRulesSnapshot {
+  readonly maxOfflineDurationMs: number;
+  readonly playerAttackIntervalMs: number;
+  readonly passiveRegenIntervalMs: number;
+  readonly passiveHpRegenAmount: number;
+  readonly passiveMpRegenAmount: number;
+}
+
+/**
+ * Immutable snapshot of all balance, character, equipment, resource, strategy, zone,
+ * and monster parameters frozen when a hunt begins.
+ * Any modification to these parameters requires stopping the current hunt and starting a new one.
+ */
+export interface HuntConfigurationSnapshot {
+  readonly simulationVersion: string;
+  readonly configDigest: string;
+  readonly zoneId: string;
+  readonly strategy: HuntStrategy;
+  readonly timings: HuntTimingRulesSnapshot;
+  readonly strategyProfile: StrategyProfileConfig;
+  readonly zone: ZoneCombatConfig;
+  readonly monsters: Readonly<Record<string, MonsterCombatConfig>>;
+  readonly character: CombatCharacterSnapshot;
+  readonly resources: CombatResourceLoadout;
+}
+
 export interface ActiveEncounterState {
   readonly encounterSeq: number;
   readonly monsterId: string;
@@ -120,6 +147,8 @@ export interface ActiveEncounterState {
 
 export interface CombatCheckpointState {
   readonly simulationVersion: string;
+  readonly configDigest: string;
+  readonly snapshot: HuntConfigurationSnapshot;
   readonly zoneId: string;
   readonly strategy: HuntStrategy;
   readonly elapsedMs: number;
@@ -145,6 +174,13 @@ export interface CombatCheckpointState {
   readonly rng: RngCheckpointState;
 }
 
+/**
+ * Safe public projection of a hunt checkpoint for API/UI consumption.
+ * Explicitly excludes `rng` (`seed`, `state`, `cursor`) and raw internal snapshot
+ * so clients can never inspect or predict upcoming RNG rolls or farm seeds.
+ */
+export type PublicHuntCheckpointView = Omit<CombatCheckpointState, 'rng' | 'snapshot'>;
+
 export interface SimulateHuntSegmentInput {
   readonly character: CombatCharacterSnapshot;
   readonly checkpoint: CombatCheckpointState;
@@ -154,7 +190,10 @@ export interface SimulateHuntSegmentInput {
 
 export interface SimulateHuntSegmentResult {
   readonly checkpoint: CombatCheckpointState;
+  readonly requestedDurationMs: number;
   readonly deltaElapsedMs: number;
+  readonly unprocessedDurationMs: number;
+  readonly isPartialSettlement: boolean;
   readonly deltaKills: number;
   readonly deltaKillsByMonster: Readonly<Record<string, number>>;
   readonly deltaXpGained: number;

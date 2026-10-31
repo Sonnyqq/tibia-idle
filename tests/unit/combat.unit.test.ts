@@ -1,7 +1,10 @@
 import {
   analyzeZoneEfficiency,
   assertCatalogAlignmentWithCombatConfig,
+  assertNoRngLeakInPublicPayload,
   type CombatCharacterSnapshot,
+  type CombatCheckpointState,
+  type CombatResourceLoadout,
   type CombatSimulationConfig,
   createInitialCombatCheckpoint,
   createInitialRngState,
@@ -9,17 +12,24 @@ import {
   createStatefulRng,
   DEFAULT_COMBAT_RESOURCES,
   DEFAULT_COMBAT_SIMULATION_CONFIG,
+  deserializeCombatCheckpoint,
+  generateCryptographicHuntSeed,
   HUNT_STRATEGIES,
   MAX_OFFLINE_DURATION_MS,
+  MAX_POTION_STACK_COUNT,
   resolveKnightAttack,
   resolveMonsterAttack,
   rollMonsterKillLoot,
+  serializeCombatCheckpoint,
   simulateHuntSegment,
-  validateCombatConfig
+  toPublicHuntCheckpointView,
+  validateCombatCheckpoint,
+  validateCombatConfig,
+  validateCombatResources
 } from '@tibia-idle/domain';
 import { describe, expect, it } from 'vitest';
 
-describe('IDLE-004A — Deterministic Idle Combat Engine (Unit, Golden, Replay, Chunk Equivalence & Property Tests)', () => {
+describe('IDLE-004A — Deterministic Idle Combat Engine (Unit, Golden, Replay, Partial Settlement, Validation & Security Tests)', () => {
   it('aligns 100% with INITIAL_ZONES_CATALOG (3 zones, 6 monsters, 12 items) and validates config', () => {
     expect(() => assertCatalogAlignmentWithCombatConfig()).not.toThrow();
     expect(() => validateCombatConfig(DEFAULT_COMBAT_SIMULATION_CONFIG)).not.toThrow();
@@ -143,7 +153,7 @@ describe('IDLE-004A — Deterministic Idle Combat Engine (Unit, Golden, Replay, 
       expect(half1.deltaXpGained + half2.deltaXpGained).toBe(continuous.deltaXpGained);
       expect(half1.deltaGoldGained + half2.deltaGoldGained).toBe(continuous.deltaGoldGained);
 
-      // Irregular millisecond splits that cut directly across ongoing encounters (e.g. 777ms, 2345ms, ...)
+      // Irregular millisecond splits that cut directly across ongoing encounters
       const irregularChunks = [
         777,
         2_345,
@@ -167,6 +177,415 @@ describe('IDLE-004A — Deterministic Idle Combat Engine (Unit, Golden, Replay, 
 
       expect(runningCp).toEqual(continuous.checkpoint);
     }
+  });
+
+  it('handles EVENT_BUDGET_EXHAUSTED partial settlement and resumes to 100% bit-exact equivalence without losing time or duplicating rewards', () => {
+    const knight = createKnightCombatSnapshot({
+      level: 10,
+      melee: 32,
+      shielding: 30
+    });
+    const cp0 = createInitialCombatCheckpoint({
+      character: knight,
+      zoneId: 'damp-catacombs',
+      strategy: 'balanced',
+      seed: 20260401
+    });
+
+    const targetDurationMs = 120_000; // 2 minutes
+    const continuous = simulateHuntSegment({
+      character: knight,
+      checkpoint: cp0,
+      durationMs: targetDurationMs
+    });
+    expect(continuous.stopReason).toBe('TIME_REACHED');
+    expect(continuous.isPartialSettlement).toBe(false);
+    expect(continuous.unprocessedDurationMs).toBe(0);
+    expect(continuous.deltaElapsedMs).toBe(targetDurationMs);
+
+    // Test very low event budgets (1, 2, 5, 19) to force frequent mid-encounter partial settlements
+    for (const budget of [1, 2, 5, 19]) {
+      const lowBudgetConfig: CombatSimulationConfig = {
+        ...DEFAULT_COMBAT_SIMULATION_CONFIG,
+        maxEventsPerCall: budget
+      };
+
+      // First call with low budget must NOT claim TIME_REACHED
+      const firstCall = simulateHuntSegment({
+        character: knight,
+        checkpoint: cp0,
+        durationMs: targetDurationMs,
+        config: lowBudgetConfig
+      });
+      expect(firstCall.stopReason).toBe('EVENT_BUDGET_EXHAUSTED');
+      expect(firstCall.isPartialSettlement).toBe(true);
+      expect(firstCall.checkpoint.terminated).toBe(false);
+      expect(firstCall.checkpoint.stopReason).toBeNull();
+      expect(firstCall.deltaElapsedMs).toBeLessThan(targetDurationMs);
+      expect(firstCall.deltaElapsedMs + firstCall.unprocessedDurationMs).toBe(targetDurationMs);
+
+      // Resume loop until all requested time is processed
+      let currentCp = cp0;
+      let remainingMs = targetDurationMs;
+      let sumElapsedMs = 0;
+      let sumKills = 0;
+      let sumXp = 0;
+      let sumGold = 0;
+      const sumLoot: Record<string, number> = {};
+      let calls = 0;
+
+      while (remainingMs > 0) {
+        calls += 1;
+        expect(calls).toBeLessThan(1000);
+        const step = simulateHuntSegment({
+          character: knight,
+          checkpoint: currentCp,
+          durationMs: remainingMs,
+          config: lowBudgetConfig
+        });
+
+        // Every partial step must make forward progress on events or time
+        expect(step.simulatedEvents > 0 || step.deltaElapsedMs > 0).toBe(true);
+        expect(step.deltaElapsedMs + step.unprocessedDurationMs).toBe(remainingMs);
+
+        sumElapsedMs += step.deltaElapsedMs;
+        sumKills += step.deltaKills;
+        sumXp += step.deltaXpGained;
+        sumGold += step.deltaGoldGained;
+        for (const [itemId, qty] of Object.entries(step.deltaLootByItem)) {
+          sumLoot[itemId] = (sumLoot[itemId] ?? 0) + qty;
+        }
+
+        currentCp = step.checkpoint;
+        remainingMs = step.unprocessedDurationMs;
+
+        if (!step.isPartialSettlement) {
+          expect(step.stopReason).toBe('TIME_REACHED');
+          expect(remainingMs).toBe(0);
+          break;
+        } else {
+          expect(step.stopReason).toBe('EVENT_BUDGET_EXHAUSTED');
+        }
+      }
+
+      // Bit-for-bit identical final checkpoint and zero lost time / zero duplicate rewards
+      expect(sumElapsedMs).toBe(targetDurationMs);
+      expect(sumKills).toBe(continuous.deltaKills);
+      expect(sumXp).toBe(continuous.deltaXpGained);
+      expect(sumGold).toBe(continuous.deltaGoldGained);
+      expect(sumLoot).toEqual(continuous.deltaLootByItem);
+      expect(currentCp).toEqual(continuous.checkpoint);
+    }
+
+    // Also verify that >24h request interrupted by EVENT_BUDGET_EXHAUSTED does NOT prematurely report MAX_OFFLINE_CAP_REACHED
+    const lowBudgetCapRes = simulateHuntSegment({
+      character: knight,
+      checkpoint: cp0,
+      durationMs: MAX_OFFLINE_DURATION_MS + 60_000,
+      config: {
+        ...DEFAULT_COMBAT_SIMULATION_CONFIG,
+        maxEventsPerCall: 5
+      }
+    });
+    expect(lowBudgetCapRes.stopReason).toBe('EVENT_BUDGET_EXHAUSTED');
+    expect(lowBudgetCapRes.isPartialSettlement).toBe(true);
+    expect(lowBudgetCapRes.checkpoint.terminated).toBe(false);
+    expect(lowBudgetCapRes.checkpoint.elapsedMs).toBeLessThan(MAX_OFFLINE_DURATION_MS);
+  });
+
+  it('supports JSON checkpoint serialization round-trip and rejects tampered checkpoints', () => {
+    const knight = createKnightCombatSnapshot({
+      level: 9,
+      melee: 28,
+      shielding: 27
+    });
+    const cp0 = createInitialCombatCheckpoint({
+      character: knight,
+      zoneId: 'sunken-crypts',
+      strategy: 'balanced',
+      seed: 314159
+    });
+
+    const continuous = simulateHuntSegment({
+      character: knight,
+      checkpoint: cp0,
+      durationMs: 60_000
+    });
+
+    // Stop mid-encounter at 1,500ms, serialize to JSON, deserialize, then stop at 13,333ms, serialize/deserialize again, and finish 60,000ms
+    const part1 = simulateHuntSegment({
+      character: knight,
+      checkpoint: cp0,
+      durationMs: 1_500
+    });
+    expect(part1.checkpoint.activeEncounter).not.toBeNull();
+
+    const json1 = serializeCombatCheckpoint(part1.checkpoint);
+    const restoredCp1 = deserializeCombatCheckpoint(json1);
+    expect(restoredCp1).toEqual(part1.checkpoint);
+    expect(Object.isFrozen(restoredCp1)).toBe(true);
+    expect(Object.isFrozen(restoredCp1.snapshot)).toBe(true);
+
+    const part2 = simulateHuntSegment({
+      character: knight,
+      checkpoint: restoredCp1,
+      durationMs: 11_833
+    });
+    const json = serializeCombatCheckpoint(part2.checkpoint);
+    const restoredCp = deserializeCombatCheckpoint(json);
+    expect(restoredCp).toEqual(part2.checkpoint);
+
+    const part3 = simulateHuntSegment({
+      character: knight,
+      checkpoint: restoredCp,
+      durationMs: 60_000 - 13_333
+    });
+    expect(part3.checkpoint).toEqual(continuous.checkpoint);
+
+    // Reject malformed JSON and tampered checkpoint fields
+    expect(() => deserializeCombatCheckpoint('')).toThrow();
+    expect(() => deserializeCombatCheckpoint('{not-valid-json')).toThrow();
+
+    const tamperedPotionConservation = JSON.parse(json) as CombatCheckpointState;
+    (tamperedPotionConservation as { hpPotionsRemaining: number }).hpPotionsRemaining += 10;
+    expect(() => deserializeCombatCheckpoint(JSON.stringify(tamperedPotionConservation))).toThrow(
+      /Invalid numeric state or potion invariant/
+    );
+
+    const tamperedSnapshotStat = JSON.parse(json) as CombatCheckpointState;
+    (
+      tamperedSnapshotStat.snapshot.character as {
+        melee: number;
+      }
+    ).melee = 999;
+    expect(() => deserializeCombatCheckpoint(JSON.stringify(tamperedSnapshotStat))).toThrow(
+      /Checkpoint configuration digest or header mismatch/
+    );
+  });
+
+  it('validates resources strictly, rejects zero-heal potions, and handles extreme potion stacks in O(1) without loops', () => {
+    const knight = createKnightCombatSnapshot({
+      level: 10,
+      melee: 30,
+      shielding: 30,
+      hp: 50,
+      maxHp: 5000,
+      mp: 10,
+      maxMp: 2000
+    });
+
+    // Zero or negative heal/restore amounts must be rejected (prevents infinite potion loops)
+    const zeroHpHeal: CombatResourceLoadout = {
+      ...DEFAULT_COMBAT_RESOURCES,
+      hpPotionHealAmount: 0
+    };
+    const zeroMpRestore: CombatResourceLoadout = {
+      ...DEFAULT_COMBAT_RESOURCES,
+      mpPotionRestoreAmount: 0
+    };
+    const negativeHeal: CombatResourceLoadout = {
+      ...DEFAULT_COMBAT_RESOURCES,
+      hpPotionHealAmount: -25
+    };
+    expect(() => validateCombatResources(zeroHpHeal)).toThrow(/heal\/restore amounts/);
+    expect(() => validateCombatResources(zeroMpRestore)).toThrow(/heal\/restore amounts/);
+    expect(() => validateCombatResources(negativeHeal)).toThrow(/heal\/restore amounts/);
+
+    expect(() =>
+      createInitialCombatCheckpoint({
+        character: knight,
+        zoneId: 'damp-catacombs',
+        strategy: 'safe',
+        seed: 1,
+        resources: zeroHpHeal
+      })
+    ).toThrow(/heal\/restore amounts/);
+
+    // NaN, Infinity, negative counts, floats, or stacks above MAX_POTION_STACK_COUNT must be rejected
+    const badResourceCases: CombatResourceLoadout[] = [
+      { ...DEFAULT_COMBAT_RESOURCES, hpPotions: -1 },
+      { ...DEFAULT_COMBAT_RESOURCES, mpPotions: -5 },
+      { ...DEFAULT_COMBAT_RESOURCES, hpPotions: Number.NaN },
+      { ...DEFAULT_COMBAT_RESOURCES, mpPotions: Number.POSITIVE_INFINITY },
+      { ...DEFAULT_COMBAT_RESOURCES, hpPotions: 12.5 },
+      { ...DEFAULT_COMBAT_RESOURCES, hpPotions: MAX_POTION_STACK_COUNT + 1 },
+      { ...DEFAULT_COMBAT_RESOURCES, hpPotionUnitCostGold: -1 },
+      { ...DEFAULT_COMBAT_RESOURCES, mpPotionUnitCostGold: Number.NaN }
+    ];
+    for (const invalidResources of badResourceCases) {
+      expect(() => validateCombatResources(invalidResources)).toThrow();
+    }
+
+    // Extreme valid potion count (MAX_POTION_STACK_COUNT = 1_000_000) with heal=1 and large HP deficit
+    // resolves in O(1) time without hanging
+    const extremeValidResources: CombatResourceLoadout = {
+      hpPotions: MAX_POTION_STACK_COUNT,
+      mpPotions: MAX_POTION_STACK_COUNT,
+      hpPotionHealAmount: 1,
+      mpPotionRestoreAmount: 1,
+      hpPotionUnitCostGold: 1,
+      mpPotionUnitCostGold: 1
+    };
+    const cpExtreme = createInitialCombatCheckpoint({
+      character: knight,
+      zoneId: 'damp-catacombs',
+      strategy: 'safe',
+      seed: 123,
+      resources: extremeValidResources
+    });
+    const resExtreme = simulateHuntSegment({
+      character: knight,
+      checkpoint: cpExtreme,
+      durationMs: 2_000,
+      resourcesConfig: extremeValidResources
+    });
+    // Safe threshold is 65% of 5000 = 3250 -> targetHp = 3251 -> heals from 50 to 3251 using 3201 potions in O(1)
+    expect(resExtreme.deltaHpPotionsUsed).toBeGreaterThanOrEqual(3201);
+    expect(
+      resExtreme.checkpoint.hpPotionsRemaining + resExtreme.checkpoint.hpPotionsUsed
+    ).toBe(MAX_POTION_STACK_COUNT);
+  });
+
+  it('enforces immutable hunt configuration snapshot and rejects mid-hunt parameter changes', () => {
+    const knight = createKnightCombatSnapshot({
+      level: 8,
+      melee: 25,
+      shielding: 24
+    });
+    const cp0 = createInitialCombatCheckpoint({
+      character: knight,
+      zoneId: 'damp-catacombs',
+      strategy: 'balanced',
+      seed: 77
+    });
+
+    // Snapshot is deeply frozen
+    expect(Object.isFrozen(cp0)).toBe(true);
+    expect(Object.isFrozen(cp0.snapshot)).toBe(true);
+    expect(Object.isFrozen(cp0.snapshot.character)).toBe(true);
+    expect(Object.isFrozen(cp0.snapshot.character.equipment)).toBe(true);
+    expect(Object.isFrozen(cp0.snapshot.resources)).toBe(true);
+    expect(Object.isFrozen(cp0.snapshot.monsters)).toBe(true);
+
+    // 1. Mid-hunt change to character melee or equipment is forbidden
+    const buffedKnight: CombatCharacterSnapshot = {
+      ...knight,
+      melee: knight.melee + 5
+    };
+    expect(() =>
+      simulateHuntSegment({
+        character: buffedKnight,
+        checkpoint: cp0,
+        durationMs: 10_000
+      })
+    ).toThrow(/Hunt configuration mismatch/);
+
+    const swappedGearKnight: CombatCharacterSnapshot = {
+      ...knight,
+      equipment: {
+        ...knight.equipment,
+        weaponAttack: knight.equipment.weaponAttack + 10
+      }
+    };
+    expect(() =>
+      simulateHuntSegment({
+        character: swappedGearKnight,
+        checkpoint: cp0,
+        durationMs: 10_000
+      })
+    ).toThrow(/Hunt configuration mismatch/);
+
+    // 2. Mid-hunt change to potion heal amount or initial loadout is forbidden
+    expect(() =>
+      simulateHuntSegment({
+        character: knight,
+        checkpoint: cp0,
+        durationMs: 10_000,
+        resourcesConfig: {
+          ...DEFAULT_COMBAT_RESOURCES,
+          hpPotionHealAmount: 200
+        }
+      })
+    ).toThrow(/Hunt configuration mismatch/);
+
+    // 3. Mid-hunt change to monster combat stats or strategy parameters is forbidden
+    const stalker = DEFAULT_COMBAT_SIMULATION_CONFIG.monsters['cellar-stalker'];
+    if (!stalker) {
+      throw new Error('Missing cellar-stalker config');
+    }
+    const modifiedBalanceConfig: CombatSimulationConfig = {
+      ...DEFAULT_COMBAT_SIMULATION_CONFIG,
+      monsters: {
+        ...DEFAULT_COMBAT_SIMULATION_CONFIG.monsters,
+        'cellar-stalker': {
+          ...stalker,
+          xpReward: 9999
+        }
+      }
+    };
+    expect(() =>
+      simulateHuntSegment({
+        character: knight,
+        checkpoint: cp0,
+        durationMs: 10_000,
+        config: modifiedBalanceConfig
+      })
+    ).toThrow(/Hunt configuration mismatch/);
+
+    // 4. Mid-hunt change to simulationVersion is forbidden
+    const modifiedVersionConfig: CombatSimulationConfig = {
+      ...DEFAULT_COMBAT_SIMULATION_CONFIG,
+      version: '2.0.0'
+    };
+    expect(() =>
+      simulateHuntSegment({
+        character: knight,
+        checkpoint: cp0,
+        durationMs: 10_000,
+        config: modifiedVersionConfig
+      })
+    ).toThrow(/does not match config version/);
+  });
+
+  it('enforces RNG security boundary: server CSPRNG seed generation and public payload redaction', () => {
+    const seed1 = generateCryptographicHuntSeed();
+    const seed2 = generateCryptographicHuntSeed();
+    expect(Number.isSafeInteger(seed1)).toBe(true);
+    expect(seed1).toBeGreaterThanOrEqual(0);
+    expect(seed1).toBeLessThanOrEqual(0xffffffff);
+    expect(Number.isSafeInteger(seed2)).toBe(true);
+
+    // Deterministic test injection for cryptographic seed generator
+    const injectedSeed = generateCryptographicHuntSeed(
+      () => new Uint8Array([0x12, 0x34, 0x56, 0x78])
+    );
+    expect(injectedSeed).toBe(0x12345678);
+    expect(() => generateCryptographicHuntSeed(() => new Uint8Array([1, 2]))).toThrow(
+      /at least 4 bytes/
+    );
+
+    const knight = createKnightCombatSnapshot({ level: 5, melee: 20, shielding: 20 });
+    const cp = createInitialCombatCheckpoint({
+      character: knight,
+      zoneId: 'damp-catacombs',
+      strategy: 'balanced',
+      seed: seed1
+    });
+
+    // Internal checkpoint contains `rng` and triggers leak guard if exposed directly
+    expect(() => assertNoRngLeakInPublicPayload(cp)).toThrow(/Security boundary violation/);
+    expect(() => assertNoRngLeakInPublicPayload({ nested: { seed: 123 } })).toThrow(
+      /Security boundary violation/
+    );
+    expect(() => assertNoRngLeakInPublicPayload({ cursor: 5 })).toThrow(
+      /Security boundary violation/
+    );
+
+    // Public projection strips `rng` and `snapshot` cleanly
+    const publicView = toPublicHuntCheckpointView(cp);
+    expect('rng' in publicView).toBe(false);
+    expect('snapshot' in publicView).toBe(false);
+    expect(() => assertNoRngLeakInPublicPayload(publicView)).not.toThrow();
   });
 
   it('handles 0s, 1s, 1h, 24h, and >24h cap durations accurately', () => {
@@ -239,7 +658,6 @@ describe('IDLE-004A — Deterministic Idle Combat Engine (Unit, Golden, Replay, 
   });
 
   it('terminates simulation cleanly on character death or critical potion exhaustion and never drops HP/MP below 0', () => {
-    // Weak level 1 knight with 0 potions entering high-level ashwind-ridge
     const fragileKnight = createKnightCombatSnapshot({
       level: 1,
       melee: 10,
@@ -352,13 +770,10 @@ describe('IDLE-004A — Deterministic Idle Combat Engine (Unit, Golden, Replay, 
       resources: largeResources
     });
 
-    // Aggressive kills faster and earns more XP/h than Balanced, which kills faster than Safe
     expect(aggressiveMetrics.killsPerHour).toBeGreaterThan(balancedMetrics.killsPerHour);
     expect(balancedMetrics.killsPerHour).toBeGreaterThan(safeMetrics.killsPerHour);
     expect(aggressiveMetrics.xpPerHour).toBeGreaterThan(balancedMetrics.xpPerHour);
     expect(balancedMetrics.xpPerHour).toBeGreaterThan(safeMetrics.xpPerHour);
-
-    // Aggressive consumes more mana potions (Brutal Strike) and takes more damage than Safe
     expect(aggressiveMetrics.mpPotionsPerHour).toBeGreaterThan(safeMetrics.mpPotionsPerHour);
   });
 
@@ -391,6 +806,18 @@ describe('IDLE-004A — Deterministic Idle Combat Engine (Unit, Golden, Replay, 
       playerAttackIntervalMs: 0
     };
     expect(() => validateCombatConfig(badConfig)).toThrow();
+
+    const nanThresholdConfig: CombatSimulationConfig = {
+      ...DEFAULT_COMBAT_SIMULATION_CONFIG,
+      strategies: {
+        ...DEFAULT_COMBAT_SIMULATION_CONFIG.strategies,
+        safe: {
+          ...DEFAULT_COMBAT_SIMULATION_CONFIG.strategies.safe,
+          hpPotionThresholdPermille: Number.NaN
+        }
+      }
+    };
+    expect(() => validateCombatConfig(nanThresholdConfig)).toThrow(/Invalid strategy configuration/);
   });
 
   it('verifies property invariants across 60 randomized seeds, levels, zones, and strategies', () => {
@@ -421,6 +848,7 @@ describe('IDLE-004A — Deterministic Idle Combat Engine (Unit, Golden, Replay, 
       });
 
       const cp = res.checkpoint;
+      expect(() => validateCombatCheckpoint(cp)).not.toThrow();
 
       // Invariant 1: Vitals and resources are finite integers within [0, max]
       expect(Number.isSafeInteger(cp.currentHp)).toBe(true);
@@ -433,6 +861,8 @@ describe('IDLE-004A — Deterministic Idle Combat Engine (Unit, Golden, Replay, 
 
       expect(cp.hpPotionsRemaining).toBeGreaterThanOrEqual(0);
       expect(cp.mpPotionsRemaining).toBeGreaterThanOrEqual(0);
+      expect(cp.hpPotionsRemaining + cp.hpPotionsUsed).toBe(cp.snapshot.resources.hpPotions);
+      expect(cp.mpPotionsRemaining + cp.mpPotionsUsed).toBe(cp.snapshot.resources.mpPotions);
 
       // Invariant 2: Rewards are non-negative integers and zero when totalKills === 0
       expect(Number.isSafeInteger(cp.totalXpGained)).toBe(true);

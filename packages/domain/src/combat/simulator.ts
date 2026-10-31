@@ -1,21 +1,34 @@
 import {
+  computeHuntSnapshotDigest,
+   deepFreeze,
   DEFAULT_COMBAT_RESOURCES,
   DEFAULT_COMBAT_SIMULATION_CONFIG,
   DEFAULT_KNIGHT_EQUIPMENT,
-  validateCombatConfig
+  MAX_CHARACTER_LEVEL,
+  MAX_CHARACTER_STAT,
+  MAX_CHARACTER_VITAL,
+  validateCombatConfig,
+  validateCombatResources
 } from './config.js';
 import { resolveKnightAttack, resolveMonsterAttack } from './damage.js';
 import { createEncounterState, selectZoneMonster } from './encounter.js';
 import { rollMonsterKillLoot } from './loot.js';
-import { createInitialRngState, createStatefulRng } from './rng.js';
+import {
+  createInitialRngState,
+  createStatefulRng,
+  validateRngCheckpointState
+} from './rng.js';
 import {
   type ActiveEncounterState,
   type CombatCharacterSnapshot,
   type CombatCheckpointState,
   type CombatResourceLoadout,
   type CombatSimulationConfig,
+  HUNT_STOP_REASONS,
+  type HuntConfigurationSnapshot,
   type HuntStopReason,
   type HuntStrategy,
+  type MonsterCombatConfig,
   type SimulateHuntSegmentInput,
   type SimulateHuntSegmentResult,
   type ZoneAnalyticsSummary
@@ -31,78 +44,282 @@ export interface CreateInitialCheckpointInput {
 }
 
 export function validateCharacterSnapshot(character: CombatCharacterSnapshot): void {
+  if (typeof character !== 'object' || character === null) {
+    throw new RangeError('CombatCharacterSnapshot must be a non-null object');
+  }
+  if (typeof character.characterId !== 'string' || character.characterId.trim().length === 0) {
+    throw new RangeError('CombatCharacterSnapshot.characterId must be a non-empty string');
+  }
   if (character.vocation !== 'knight') {
     throw new RangeError(
       `Unsupported vocation '${character.vocation}' in IDLE-004A combat simulator; only 'knight' is enabled before P03`
     );
   }
   if (
+    typeof character.equipment !== 'object' ||
+    character.equipment === null ||
     !Number.isSafeInteger(character.level) ||
     character.level < 1 ||
+    character.level > MAX_CHARACTER_LEVEL ||
+    !Number.isSafeInteger(character.xp) ||
+    character.xp < 0 ||
     !Number.isSafeInteger(character.maxHp) ||
     character.maxHp < 1 ||
+    character.maxHp > MAX_CHARACTER_VITAL ||
     !Number.isSafeInteger(character.hp) ||
     character.hp < 0 ||
     character.hp > character.maxHp ||
     !Number.isSafeInteger(character.maxMp) ||
     character.maxMp < 0 ||
+    character.maxMp > MAX_CHARACTER_VITAL ||
     !Number.isSafeInteger(character.mp) ||
     character.mp < 0 ||
     character.mp > character.maxMp ||
     !Number.isSafeInteger(character.melee) ||
     character.melee < 1 ||
+    character.melee > MAX_CHARACTER_STAT ||
     !Number.isSafeInteger(character.shielding) ||
     character.shielding < 1 ||
+    character.shielding > MAX_CHARACTER_STAT ||
+    !Number.isSafeInteger(character.magic) ||
+    character.magic < 0 ||
+    character.magic > MAX_CHARACTER_STAT ||
     !Number.isSafeInteger(character.equipment.weaponAttack) ||
     character.equipment.weaponAttack < 1 ||
+    character.equipment.weaponAttack > MAX_CHARACTER_STAT ||
     !Number.isSafeInteger(character.equipment.shieldDefense) ||
     character.equipment.shieldDefense < 0 ||
+    character.equipment.shieldDefense > MAX_CHARACTER_STAT ||
     !Number.isSafeInteger(character.equipment.totalArmor) ||
-    character.equipment.totalArmor < 0
+    character.equipment.totalArmor < 0 ||
+    character.equipment.totalArmor > MAX_CHARACTER_STAT ||
+    !Number.isSafeInteger(character.equipment.critChancePermille) ||
+    character.equipment.critChancePermille < 0 ||
+    character.equipment.critChancePermille > 1000 ||
+    !Number.isSafeInteger(character.equipment.critMultiplierPermille) ||
+    character.equipment.critMultiplierPermille < 1000 ||
+    character.equipment.critMultiplierPermille > 10_000
   ) {
     throw new RangeError('Invalid CombatCharacterSnapshot numeric bounds');
   }
+}
+
+/**
+ * Builds an immutable, deeply-frozen snapshot of all parameters that govern a hunt.
+ * Once a hunt starts, any change to character stats, equipment, strategy, zone,
+ * resources/potions, or monster/combat balance requires starting a new hunt.
+ */
+export function createHuntConfigurationSnapshot(params: {
+  readonly character: CombatCharacterSnapshot;
+  readonly zoneId: string;
+  readonly strategy: HuntStrategy;
+  readonly resources?: CombatResourceLoadout | undefined;
+  readonly config?: CombatSimulationConfig | undefined;
+}): HuntConfigurationSnapshot {
+  const config = params.config ?? DEFAULT_COMBAT_SIMULATION_CONFIG;
+  validateCombatConfig(config);
+  validateCharacterSnapshot(params.character);
+
+  const resources = params.resources ?? DEFAULT_COMBAT_RESOURCES;
+  validateCombatResources(resources);
+
+  const zone = config.zones[params.zoneId];
+  if (!zone) {
+    throw new RangeError(`Unknown zone '${params.zoneId}'`);
+  }
+  const strategyProfile = config.strategies[params.strategy];
+  if (!strategyProfile) {
+    throw new RangeError(`Unknown strategy '${params.strategy}'`);
+  }
+
+  const zoneMonsters: Record<string, MonsterCombatConfig> = {};
+  for (const monsterId of zone.monsterIds) {
+    const monster = config.monsters[monsterId];
+    if (!monster) {
+      throw new RangeError(`Zone '${zone.id}' references unknown monster '${monsterId}'`);
+    }
+    zoneMonsters[monsterId] = {
+      ...monster,
+      lootTable: monster.lootTable.map((rule) => ({ ...rule }))
+    };
+  }
+
+  const baseSnapshot: Omit<HuntConfigurationSnapshot, 'configDigest'> = {
+    simulationVersion: config.version,
+    zoneId: zone.id,
+    strategy: strategyProfile.id,
+    timings: {
+      maxOfflineDurationMs: config.maxOfflineDurationMs,
+      playerAttackIntervalMs: config.playerAttackIntervalMs,
+      passiveRegenIntervalMs: config.passiveRegenIntervalMs,
+      passiveHpRegenAmount: config.passiveHpRegenAmount,
+      passiveMpRegenAmount: config.passiveMpRegenAmount
+    },
+    strategyProfile: { ...strategyProfile },
+    zone: {
+      ...zone,
+      monsterIds: [...zone.monsterIds]
+    },
+    monsters: zoneMonsters,
+    character: {
+      ...params.character,
+      equipment: { ...params.character.equipment }
+    },
+    resources: { ...resources }
+  };
+
+  const configDigest = computeHuntSnapshotDigest(baseSnapshot);
+  return deepFreeze({
+    ...baseSnapshot,
+    configDigest
+  });
+}
+
+export function validateCombatCheckpoint(checkpoint: CombatCheckpointState): void {
+  if (typeof checkpoint !== 'object' || checkpoint === null) {
+    throw new RangeError('CombatCheckpointState must be a non-null object');
+  }
+  if (typeof checkpoint.snapshot !== 'object' || checkpoint.snapshot === null) {
+    throw new RangeError('CombatCheckpointState is missing immutable HuntConfigurationSnapshot');
+  }
+
+  const snap = checkpoint.snapshot;
+  validateCharacterSnapshot(snap.character);
+  validateCombatResources(snap.resources);
+
+  const expectedDigest = computeHuntSnapshotDigest(snap);
+  if (
+    checkpoint.configDigest !== expectedDigest ||
+    snap.configDigest !== expectedDigest ||
+    checkpoint.simulationVersion !== snap.simulationVersion ||
+    checkpoint.zoneId !== snap.zoneId ||
+    checkpoint.strategy !== snap.strategy
+  ) {
+    throw new RangeError(
+      'Checkpoint configuration digest or header mismatch (tampered or incompatible snapshot)'
+    );
+  }
+
+  validateRngCheckpointState(checkpoint.rng);
+
+  if (
+    !Number.isSafeInteger(checkpoint.elapsedMs) ||
+    checkpoint.elapsedMs < 0 ||
+    checkpoint.elapsedMs > snap.timings.maxOfflineDurationMs ||
+    !Number.isSafeInteger(checkpoint.currentHp) ||
+    checkpoint.currentHp < 0 ||
+    checkpoint.currentHp > snap.character.maxHp ||
+    !Number.isSafeInteger(checkpoint.currentMp) ||
+    checkpoint.currentMp < 0 ||
+    checkpoint.currentMp > snap.character.maxMp ||
+    !Number.isSafeInteger(checkpoint.hpPotionsRemaining) ||
+    checkpoint.hpPotionsRemaining < 0 ||
+    checkpoint.hpPotionsRemaining > snap.resources.hpPotions ||
+    !Number.isSafeInteger(checkpoint.mpPotionsRemaining) ||
+    checkpoint.mpPotionsRemaining < 0 ||
+    checkpoint.mpPotionsRemaining > snap.resources.mpPotions ||
+    !Number.isSafeInteger(checkpoint.hpPotionsUsed) ||
+    checkpoint.hpPotionsUsed < 0 ||
+    checkpoint.hpPotionsRemaining + checkpoint.hpPotionsUsed !== snap.resources.hpPotions ||
+    !Number.isSafeInteger(checkpoint.mpPotionsUsed) ||
+    checkpoint.mpPotionsUsed < 0 ||
+    checkpoint.mpPotionsRemaining + checkpoint.mpPotionsUsed !== snap.resources.mpPotions ||
+    !Number.isSafeInteger(checkpoint.nextPassiveRegenInMs) ||
+    checkpoint.nextPassiveRegenInMs < 1 ||
+    checkpoint.nextPassiveRegenInMs > snap.timings.passiveRegenIntervalMs ||
+    !Number.isSafeInteger(checkpoint.respawnCooldownRemainingMs) ||
+    checkpoint.respawnCooldownRemainingMs < 0 ||
+    checkpoint.respawnCooldownRemainingMs > snap.zone.searchCooldownMs ||
+    !Number.isSafeInteger(checkpoint.totalKills) ||
+    checkpoint.totalKills < 0 ||
+    !Number.isSafeInteger(checkpoint.totalXpGained) ||
+    checkpoint.totalXpGained < 0 ||
+    !Number.isSafeInteger(checkpoint.totalGoldGained) ||
+    checkpoint.totalGoldGained < 0 ||
+    !Number.isSafeInteger(checkpoint.totalDamageDealt) ||
+    checkpoint.totalDamageDealt < 0 ||
+    !Number.isSafeInteger(checkpoint.totalDamageTaken) ||
+    checkpoint.totalDamageTaken < 0 ||
+    !Number.isSafeInteger(checkpoint.brutalStrikesCast) ||
+    checkpoint.brutalStrikesCast < 0 ||
+    typeof checkpoint.terminated !== 'boolean' ||
+    (checkpoint.stopReason !== null && !HUNT_STOP_REASONS.includes(checkpoint.stopReason))
+  ) {
+    throw new RangeError('Invalid numeric state or potion invariant in CombatCheckpointState');
+  }
+
+  if (checkpoint.activeEncounter !== null) {
+    const enc = checkpoint.activeEncounter;
+    const monster = snap.monsters[enc.monsterId];
+    if (
+      !monster ||
+      !Number.isSafeInteger(enc.encounterSeq) ||
+      enc.encounterSeq < 1 ||
+      !Number.isSafeInteger(enc.monsterMaxHp) ||
+      enc.monsterMaxHp !== monster.maxHp ||
+      !Number.isSafeInteger(enc.monsterHp) ||
+      enc.monsterHp < 1 ||
+      enc.monsterHp > enc.monsterMaxHp ||
+      !Number.isSafeInteger(enc.nextPlayerAttackInMs) ||
+      enc.nextPlayerAttackInMs < 1 ||
+      enc.nextPlayerAttackInMs > snap.timings.playerAttackIntervalMs ||
+      !Number.isSafeInteger(enc.nextMonsterAttackInMs) ||
+      enc.nextMonsterAttackInMs < 1 ||
+      enc.nextMonsterAttackInMs > monster.attackIntervalMs
+    ) {
+      throw new RangeError('Invalid ActiveEncounterState in CombatCheckpointState');
+    }
+  }
+}
+
+export function serializeCombatCheckpoint(checkpoint: CombatCheckpointState): string {
+  validateCombatCheckpoint(checkpoint);
+  return JSON.stringify(checkpoint);
+}
+
+export function deserializeCombatCheckpoint(serialized: string): CombatCheckpointState {
+  if (typeof serialized !== 'string' || serialized.trim().length === 0) {
+    throw new RangeError('Serialized checkpoint must be a non-empty JSON string');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch {
+    throw new RangeError('Failed to parse serialized CombatCheckpointState JSON');
+  }
+  const checkpoint = parsed as CombatCheckpointState;
+  validateCombatCheckpoint(checkpoint);
+  return deepFreeze(checkpoint);
 }
 
 export function createInitialCombatCheckpoint(
   input: CreateInitialCheckpointInput
 ): CombatCheckpointState {
   const config = input.config ?? DEFAULT_COMBAT_SIMULATION_CONFIG;
-  validateCombatConfig(config);
-  validateCharacterSnapshot(input.character);
-
-  const zone = config.zones[input.zoneId];
-  if (!zone) {
-    throw new RangeError(`Unknown zone '${input.zoneId}'`);
-  }
-  const strategy = config.strategies[input.strategy];
-  if (!strategy) {
-    throw new RangeError(`Unknown strategy '${input.strategy}'`);
-  }
-
   const resources = input.resources ?? DEFAULT_COMBAT_RESOURCES;
-  if (
-    !Number.isSafeInteger(resources.hpPotions) ||
-    resources.hpPotions < 0 ||
-    !Number.isSafeInteger(resources.mpPotions) ||
-    resources.mpPotions < 0
-  ) {
-    throw new RangeError('Initial potion counts must be non-negative safe integers');
-  }
+  const snapshot = createHuntConfigurationSnapshot({
+    character: input.character,
+    zoneId: input.zoneId,
+    strategy: input.strategy,
+    resources,
+    config
+  });
 
-  const initialHp = input.character.hp;
+  const initialHp = snapshot.character.hp;
   const terminated = initialHp <= 0;
 
-  return {
-    simulationVersion: config.version,
-    zoneId: zone.id,
-    strategy: strategy.id,
+  return deepFreeze({
+    simulationVersion: snapshot.simulationVersion,
+    configDigest: snapshot.configDigest,
+    snapshot,
+    zoneId: snapshot.zoneId,
+    strategy: snapshot.strategy,
     elapsedMs: 0,
     currentHp: initialHp,
-    currentMp: input.character.mp,
-    hpPotionsRemaining: resources.hpPotions,
-    mpPotionsRemaining: resources.mpPotions,
-    nextPassiveRegenInMs: config.passiveRegenIntervalMs,
+    currentMp: snapshot.character.mp,
+    hpPotionsRemaining: snapshot.resources.hpPotions,
+    mpPotionsRemaining: snapshot.resources.mpPotions,
+    nextPassiveRegenInMs: snapshot.timings.passiveRegenIntervalMs,
     respawnCooldownRemainingMs: 0,
     activeEncounter: null,
     totalKills: 0,
@@ -118,48 +335,65 @@ export function createInitialCombatCheckpoint(
     terminated,
     stopReason: terminated ? 'CHARACTER_DIED' : null,
     rng: createInitialRngState(input.seed)
-  };
+  });
 }
 
 /**
  * Advances an offline/idle hunt segment deterministically by `durationMs`.
- * Guarantees exact equivalence between single-pass and multi-chunk execution.
+ * Guarantees exact equivalence between single-pass, irregular time chunks,
+ * and partial settlements interrupted by `maxEventsPerCall` (`EVENT_BUDGET_EXHAUSTED`).
  */
 export function simulateHuntSegment(
   input: SimulateHuntSegmentInput & {
     readonly resourcesConfig?: CombatResourceLoadout | undefined;
   }
 ): SimulateHuntSegmentResult {
+  const prev = input.checkpoint;
+  validateCombatCheckpoint(prev);
+
   const config = input.config ?? DEFAULT_COMBAT_SIMULATION_CONFIG;
   validateCombatConfig(config);
   validateCharacterSnapshot(input.character);
 
-  const prev = input.checkpoint;
   if (prev.simulationVersion !== config.version) {
     throw new RangeError(
       `Checkpoint version '${prev.simulationVersion}' does not match config version '${config.version}'`
     );
   }
 
-  const zone = config.zones[prev.zoneId];
-  if (!zone) {
-    throw new RangeError(`Unknown zone '${prev.zoneId}' in checkpoint`);
-  }
-  const strategy = config.strategies[prev.strategy];
-  if (!strategy) {
-    throw new RangeError(`Unknown strategy '${prev.strategy}' in checkpoint`);
+  const resourcesConfig = input.resourcesConfig ?? prev.snapshot.resources;
+  validateCombatResources(resourcesConfig);
+
+  // Enforce mid-hunt configuration immutability: character, equipment, strategy, zone,
+  // resources, and monster/balance rules cannot change after a hunt has started.
+  const candidateSnapshot = createHuntConfigurationSnapshot({
+    character: input.character,
+    zoneId: prev.zoneId,
+    strategy: prev.strategy,
+    resources: resourcesConfig,
+    config
+  });
+  if (candidateSnapshot.configDigest !== prev.configDigest) {
+    throw new RangeError(
+      'Hunt configuration mismatch: mid-hunt modification of character, equipment, resources, strategy, or combat balance is forbidden; start a new hunt instead'
+    );
   }
 
   if (!Number.isSafeInteger(input.durationMs) || input.durationMs < 0) {
     throw new RangeError('durationMs must be a non-negative safe integer');
   }
 
-  const resourcesConfig = input.resourcesConfig ?? DEFAULT_COMBAT_RESOURCES;
+  const snap = prev.snapshot;
+  const zone = snap.zone;
+  const strategy = snap.strategyProfile;
 
   if (prev.terminated) {
     return {
       checkpoint: prev,
+      requestedDurationMs: input.durationMs,
       deltaElapsedMs: 0,
+      unprocessedDurationMs: input.durationMs,
+      isPartialSettlement: false,
       deltaKills: 0,
       deltaKillsByMonster: {},
       deltaXpGained: 0,
@@ -174,7 +408,7 @@ export function simulateHuntSegment(
     };
   }
 
-  const remainingCapMs = Math.max(0, config.maxOfflineDurationMs - prev.elapsedMs);
+  const remainingCapMs = Math.max(0, snap.timings.maxOfflineDurationMs - prev.elapsedMs);
   const cappedByMaxOffline = input.durationMs > remainingCapMs;
   let remainingWindowMs = Math.min(input.durationMs, remainingCapMs);
 
@@ -207,30 +441,28 @@ export function simulateHuntSegment(
   const deltaKillsByMonster: Record<string, number> = {};
   const deltaLootByItem: Record<string, number> = {};
   let simulatedEvents = 0;
+  let eventBudgetExhausted = false;
 
   let encounterCounter = activeEncounter ? activeEncounter.encounterSeq : totalKills;
 
+  // O(1) closed-form potion consumption: prevents unbounded loops on large potion stacks
   const applyConsumablesAndRetreat = (): void => {
     if (terminated || currentHp <= 0) return;
 
-    const hpThreshold = Math.floor(
-      (input.character.maxHp * strategy.hpPotionThresholdPermille) / 1000
-    );
-    while (
-      currentHp <= hpThreshold &&
-      hpPotionsRemaining > 0 &&
-      currentHp < input.character.maxHp
-    ) {
-      hpPotionsRemaining -= 1;
-      hpPotionsUsed += 1;
-      currentHp = Math.min(
-        input.character.maxHp,
-        currentHp + resourcesConfig.hpPotionHealAmount
-      );
+    const maxHp = snap.character.maxHp;
+    const hpThreshold = Math.floor((maxHp * strategy.hpPotionThresholdPermille) / 1000);
+    if (currentHp <= hpThreshold && hpPotionsRemaining > 0 && currentHp < maxHp) {
+      const healAmount = snap.resources.hpPotionHealAmount;
+      const targetHp = Math.min(maxHp, hpThreshold + 1);
+      const potionsNeeded = Math.ceil((targetHp - currentHp) / healAmount);
+      const potionsToUse = Math.min(hpPotionsRemaining, Math.max(1, potionsNeeded));
+      hpPotionsRemaining -= potionsToUse;
+      hpPotionsUsed += potionsToUse;
+      currentHp = Math.min(maxHp, currentHp + potionsToUse * healAmount);
     }
 
     const criticalRetreatHp = Math.floor(
-      (input.character.maxHp * strategy.stopWhenOutOfHpPotionsBelowPermille) / 1000
+      (maxHp * strategy.stopWhenOutOfHpPotionsBelowPermille) / 1000
     );
     if (hpPotionsRemaining === 0 && currentHp <= criticalRetreatHp && criticalRetreatHp > 0) {
       terminated = true;
@@ -238,20 +470,16 @@ export function simulateHuntSegment(
       return;
     }
 
-    const mpThreshold = Math.floor(
-      (input.character.maxMp * strategy.mpPotionThresholdPermille) / 1000
-    );
-    while (
-      currentMp <= mpThreshold &&
-      mpPotionsRemaining > 0 &&
-      currentMp < input.character.maxMp
-    ) {
-      mpPotionsRemaining -= 1;
-      mpPotionsUsed += 1;
-      currentMp = Math.min(
-        input.character.maxMp,
-        currentMp + resourcesConfig.mpPotionRestoreAmount
-      );
+    const maxMp = snap.character.maxMp;
+    const mpThreshold = Math.floor((maxMp * strategy.mpPotionThresholdPermille) / 1000);
+    if (currentMp <= mpThreshold && mpPotionsRemaining > 0 && currentMp < maxMp) {
+      const restoreAmount = snap.resources.mpPotionRestoreAmount;
+      const targetMp = Math.min(maxMp, mpThreshold + 1);
+      const potionsNeeded = Math.ceil((targetMp - currentMp) / restoreAmount);
+      const potionsToUse = Math.min(mpPotionsRemaining, Math.max(1, potionsNeeded));
+      mpPotionsRemaining -= potionsToUse;
+      mpPotionsUsed += potionsToUse;
+      currentMp = Math.min(maxMp, currentMp + potionsToUse * restoreAmount);
     }
   };
 
@@ -262,7 +490,7 @@ export function simulateHuntSegment(
       activeEncounter = createEncounterState(
         encounterCounter,
         monster,
-        config.playerAttackIntervalMs
+        snap.timings.playerAttackIntervalMs
       );
       simulatedEvents += 1;
     }
@@ -275,6 +503,7 @@ export function simulateHuntSegment(
 
   while (remainingWindowMs > 0 && !terminated) {
     if (simulatedEvents >= config.maxEventsPerCall) {
+      eventBudgetExhausted = true;
       break;
     }
 
@@ -315,9 +544,15 @@ export function simulateHuntSegment(
 
     // 1. Passive regeneration tick
     if (nextPassiveRegenInMs <= 0) {
-      currentHp = Math.min(input.character.maxHp, currentHp + config.passiveHpRegenAmount);
-      currentMp = Math.min(input.character.maxMp, currentMp + config.passiveMpRegenAmount);
-      nextPassiveRegenInMs = config.passiveRegenIntervalMs;
+      currentHp = Math.min(
+        snap.character.maxHp,
+        currentHp + snap.timings.passiveHpRegenAmount
+      );
+      currentMp = Math.min(
+        snap.character.maxMp,
+        currentMp + snap.timings.passiveMpRegenAmount
+      );
+      nextPassiveRegenInMs = snap.timings.passiveRegenIntervalMs;
       simulatedEvents += 1;
     }
 
@@ -331,12 +566,12 @@ export function simulateHuntSegment(
 
     // 3. Player attack tick
     if (activeEncounter !== null && activeEncounter.nextPlayerAttackInMs <= 0) {
-      const monster = config.monsters[activeEncounter.monsterId];
+      const monster = snap.monsters[activeEncounter.monsterId];
       if (!monster) {
         throw new Error(`Unknown monster '${activeEncounter.monsterId}' in active encounter`);
       }
       const attackRoll = resolveKnightAttack(
-        input.character,
+        snap.character,
         monster,
         strategy,
         currentMp,
@@ -375,20 +610,20 @@ export function simulateHuntSegment(
         activeEncounter = {
           ...activeEncounter,
           monsterHp: newMonsterHp,
-          nextPlayerAttackInMs: config.playerAttackIntervalMs
+          nextPlayerAttackInMs: snap.timings.playerAttackIntervalMs
         };
       }
     }
 
     // 4. Monster attack tick (only if monster is still alive)
     if (activeEncounter !== null && activeEncounter.nextMonsterAttackInMs <= 0) {
-      const monster = config.monsters[activeEncounter.monsterId];
+      const monster = snap.monsters[activeEncounter.monsterId];
       if (!monster) {
         throw new Error(`Unknown monster '${activeEncounter.monsterId}' in active encounter`);
       }
       const incomingDamage = resolveMonsterAttack(
         monster,
-        input.character,
+        snap.character,
         strategy,
         rng
       );
@@ -397,17 +632,17 @@ export function simulateHuntSegment(
       totalDamageTaken += appliedDamage;
       simulatedEvents += 1;
 
+      activeEncounter = {
+        ...activeEncounter,
+        nextMonsterAttackInMs: monster.attackIntervalMs
+      };
+
       if (currentHp <= 0) {
         currentHp = 0;
         terminated = true;
         stopReason = 'CHARACTER_DIED';
         break;
       }
-
-      activeEncounter = {
-        ...activeEncounter,
-        nextMonsterAttackInMs: monster.attackIntervalMs
-      };
     }
 
     // 5. Post-exchange consumable & retreat check
@@ -417,9 +652,11 @@ export function simulateHuntSegment(
   let resolvedStopReason: HuntStopReason;
   if (terminated && stopReason) {
     resolvedStopReason = stopReason;
-  } else if (elapsedMs >= config.maxOfflineDurationMs || cappedByMaxOffline) {
+  } else if (eventBudgetExhausted) {
+    resolvedStopReason = 'EVENT_BUDGET_EXHAUSTED';
+  } else if (elapsedMs >= snap.timings.maxOfflineDurationMs || cappedByMaxOffline) {
     resolvedStopReason = 'MAX_OFFLINE_CAP_REACHED';
-    if (elapsedMs >= config.maxOfflineDurationMs) {
+    if (elapsedMs >= snap.timings.maxOfflineDurationMs) {
       terminated = true;
       stopReason = 'MAX_OFFLINE_CAP_REACHED';
     }
@@ -427,8 +664,14 @@ export function simulateHuntSegment(
     resolvedStopReason = 'TIME_REACHED';
   }
 
-  const nextCheckpoint: CombatCheckpointState = {
-    simulationVersion: config.version,
+  const deltaElapsedMs = elapsedMs - prev.elapsedMs;
+  const unprocessedDurationMs = Math.max(0, input.durationMs - deltaElapsedMs);
+  const isPartialSettlement = resolvedStopReason === 'EVENT_BUDGET_EXHAUSTED';
+
+  const nextCheckpoint: CombatCheckpointState = deepFreeze({
+    simulationVersion: snap.simulationVersion,
+    configDigest: snap.configDigest,
+    snapshot: snap,
     zoneId: prev.zoneId,
     strategy: prev.strategy,
     elapsedMs,
@@ -452,11 +695,14 @@ export function simulateHuntSegment(
     terminated,
     stopReason,
     rng: rng.getState()
-  };
+  });
 
   return {
     checkpoint: nextCheckpoint,
-    deltaElapsedMs: elapsedMs - prev.elapsedMs,
+    requestedDurationMs: input.durationMs,
+    deltaElapsedMs,
+    unprocessedDurationMs,
+    isPartialSettlement,
     deltaKills: totalKills - prev.totalKills,
     deltaKillsByMonster,
     deltaXpGained: totalXpGained - prev.totalXpGained,
