@@ -1,4 +1,4 @@
-import { type CharacterDto } from '@tibia-idle/contracts';
+import { type CharacterCombatStatsDto, type CharacterDto } from '@tibia-idle/contracts';
 import { type SupportedLocale, t } from '@tibia-idle/i18n';
 import { GameIcon } from '../assets/assetRegistry.js';
 import {
@@ -12,9 +12,10 @@ import { GameWindow, StatRow } from './ui/GameUi.js';
 export interface CharacterViewProps {
   locale: SupportedLocale;
   character: CharacterDto;
+  combatStats?: CharacterCombatStatsDto | undefined;
 }
 
-export function CharacterView({ locale, character }: CharacterViewProps) {
+export function CharacterView({ locale, character, combatStats }: CharacterViewProps) {
   const xpProgress = computeXpBarProgress(character.stats.level, character.stats.xp);
   const sharedMeleeHint = t(locale, 'stats.skillSharedNote');
 
@@ -153,6 +154,93 @@ export function CharacterView({ locale, character }: CharacterViewProps) {
           </div>
         </div>
       </GameWindow>
+
+      {combatStats && (
+        <GameWindow
+          title={t(locale, 'character.combatStats')}
+          iconKey="swords"
+          iconCategory="equipment"
+          collapsible
+          minimizeLabel={t(locale, 'window.minimize')}
+          expandLabel={t(locale, 'window.expand')}
+          testId="character-combat-stats-panel"
+        >
+          <div className="subwindow-title">{t(locale, 'character.combatStats')}</div>
+          <dl className="mmo-stat-list">
+            <StatRow
+              testId="combat-stat-attack"
+              label={t(locale, 'character.attack')}
+              value={
+                combatStats.weaponAttack.bonus > 0 ? (
+                  <span>
+                    {combatStats.weaponAttack.base}{' '}
+                    <span className="stat-bonus-positive">+{combatStats.weaponAttack.bonus}</span> ={' '}
+                    <strong>{combatStats.weaponAttack.effective}</strong>
+                  </span>
+                ) : (
+                  combatStats.weaponAttack.effective
+                )
+              }
+              highlight={combatStats.weaponAttack.bonus > 0}
+            />
+            <StatRow
+              testId="combat-stat-defense"
+              label={t(locale, 'character.defense')}
+              value={
+                combatStats.shieldDefense.bonus > 0 ? (
+                  <span>
+                    {combatStats.shieldDefense.base}{' '}
+                    <span className="stat-bonus-positive">+{combatStats.shieldDefense.bonus}</span> ={' '}
+                    <strong>{combatStats.shieldDefense.effective}</strong>
+                  </span>
+                ) : (
+                  combatStats.shieldDefense.effective
+                )
+              }
+              highlight={combatStats.shieldDefense.bonus > 0}
+            />
+            <StatRow
+              testId="combat-stat-armor"
+              label={t(locale, 'character.armor')}
+              value={
+                combatStats.totalArmor.bonus > 0 ? (
+                  <span>
+                    {combatStats.totalArmor.base}{' '}
+                    <span className="stat-bonus-positive">+{combatStats.totalArmor.bonus}</span> ={' '}
+                    <strong>{combatStats.totalArmor.effective}</strong>
+                  </span>
+                ) : (
+                  combatStats.totalArmor.effective
+                )
+              }
+              highlight={combatStats.totalArmor.bonus > 0}
+            />
+            <StatRow
+              testId="combat-stat-crit-chance"
+              label={t(locale, 'character.critChance')}
+              value={
+                combatStats.critChancePermille.bonus > 0 ? (
+                  <span>
+                    {(combatStats.critChancePermille.base / 10).toFixed(1)}%{' '}
+                    <span className="stat-bonus-positive">
+                      +{(combatStats.critChancePermille.bonus / 10).toFixed(1)}%
+                    </span>{' '}
+                    = <strong>{(combatStats.critChancePermille.effective / 10).toFixed(1)}%</strong>
+                  </span>
+                ) : (
+                  `${(combatStats.critChancePermille.effective / 10).toFixed(1)}%`
+                )
+              }
+              highlight={combatStats.critChancePermille.bonus > 0}
+            />
+            <StatRow
+              testId="combat-stat-crit-mult"
+              label={t(locale, 'character.critMultiplier')}
+              value={`${(combatStats.critMultiplierPermille.effective / 1000).toFixed(2)}x`}
+            />
+          </dl>
+        </GameWindow>
+      )}
 
       <GameWindow
         title={t(locale, 'character.talentsTitle')}

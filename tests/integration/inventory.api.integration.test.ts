@@ -108,10 +108,11 @@ describe('IDLE-005A — Persistent Inventory, Backpack, Capacity & AFK Loot Clai
     const { character } = await createTestAccountAndCharacter('Backpack Hero');
 
     const containers = await getCharacterContainers(pool, character.id);
-    expect(containers).toHaveLength(1);
-    expect(containers[0]?.containerType).toBe('backpack');
-    expect(containers[0]?.slotCapacity).toBe(20);
-    expect(containers[0]?.occupiedSlots).toBe(0);
+    expect(containers.length).toBeGreaterThanOrEqual(1);
+    const backpack = containers.find((c) => c.containerType === 'backpack');
+    expect(backpack).toBeDefined();
+    expect(backpack?.slotCapacity).toBe(20);
+    expect(backpack?.occupiedSlots).toBe(0);
 
     const inv = await getCharacterInventory(pool, character.id);
     expect(inv.container.slotCapacity).toBe(20);

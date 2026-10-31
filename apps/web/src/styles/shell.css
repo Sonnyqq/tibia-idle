@@ -1216,6 +1216,54 @@ body {
   accent-color: var(--accent-gold);
 }
 
+.stat-bonus-positive {
+  color: #4ade80;
+  font-weight: 600;
+}
+
+.active-hunt-lock-notice {
+  padding: 6px 8px;
+  background-color: rgba(239, 68, 68, 0.15);
+  border: 1px solid #ef4444;
+  color: #fca5a5;
+  font-size: 11px;
+  margin-bottom: 8px;
+  text-align: center;
+}
+
+.stat-diff-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px 6px;
+  background-color: var(--game-inset);
+  border: 1px solid var(--game-border);
+  margin-bottom: 6px;
+}
+
+.stat-diff-positive {
+  color: #4ade80;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.stat-diff-negative {
+  color: #f87171;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.equipped-slot-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.equipped-item-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .reward-item-actions {
   display: flex;
   align-items: center;

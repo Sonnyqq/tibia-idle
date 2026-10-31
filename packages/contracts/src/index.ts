@@ -23,6 +23,7 @@ export const EQUIPMENT_SLOTS = [
 ] as const;
 export const EquipmentSlotSchema = z.enum(EQUIPMENT_SLOTS);
 export type EquipmentSlotDto = z.infer<typeof EquipmentSlotSchema>;
+export type EquipmentSlot = EquipmentSlotDto;
 
 export const AssetCategorySchema = z.enum([
   'vocation',

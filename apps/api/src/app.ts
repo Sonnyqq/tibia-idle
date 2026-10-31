@@ -4,12 +4,15 @@ import {
   ApiErrorSchema,
   CharacterContainersResponseSchema,
   CharacterDtoSchema,
+  CharacterEquipmentResponseSchema,
   CharacterHuntRewardsResponseSchema,
   CharacterInventoryResponseSchema,
   ClaimHuntRewardRequestSchema,
   ClaimHuntRewardResponseSchema,
   CONTRACT_VERSION,
   CreateCharacterRequestSchema,
+  EquipItemRequestSchema,
+  EquipItemResponseSchema,
   HealthResponseSchema,
   HuntSegmentsResponseSchema,
   LocaleSchema,
@@ -28,6 +31,8 @@ import {
   StartHuntResponseSchema,
   StopHuntRequestSchema,
   StopHuntResponseSchema,
+  UnequipItemRequestSchema,
+  UnequipItemResponseSchema,
   UpdateLocaleRequestSchema,
   UserDtoSchema,
   ZonesCatalogResponseSchema
@@ -38,11 +43,13 @@ import {
   createCharacterTransactional,
   createSessionRecord,
   createUserAccount,
+  equipInventoryItem,
   findActiveSessionByTokenHash,
   findCharacterByIdForUser,
   findUserByEmail,
   getActiveHuntForCharacter,
   getCharacterContainers,
+  getCharacterEquipment,
   getCharacterHuntRewardItems,
   getCharacterInventory,
   getHuntByIdForUser,
@@ -54,6 +61,7 @@ import {
   splitInventoryStack,
   startHunt,
   stopHunt,
+  unequipInventoryItem,
   updateUserLocale
 } from '@tibia-idle/database';
 import {
@@ -1269,6 +1277,197 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
       );
     }
   );
+
+  app.get<{ Params: { id: string } }>('/characters/:id/equipment', async (request, reply) => {
+    const pool = requirePool(request, reply);
+    if (!pool) return;
+
+    const resolved = await resolveActiveSession(request, pool);
+    if (!resolved) {
+      return sendApiError(reply, request, 401, 'UNAUTHORIZED', 'auth.unauthorized');
+    }
+
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(request.params.id)) {
+      return sendApiError(reply, request, 404, 'CHARACTER_NOT_FOUND', 'error.characterNotFound');
+    }
+
+    const char = await findCharacterByIdForUser(pool, request.params.id, resolved.session.userId);
+    if (!char) {
+      return sendApiError(reply, request, 404, 'CHARACTER_NOT_FOUND', 'error.characterNotFound');
+    }
+
+    const equipment = await getCharacterEquipment(pool, char.id);
+    return reply.code(200).send(CharacterEquipmentResponseSchema.parse(equipment));
+  });
+
+  app.post<{ Params: { id: string } }>('/characters/:id/equipment/equip', async (request, reply) => {
+    const pool = requirePool(request, reply);
+    if (!pool) return;
+
+    const resolved = await resolveActiveSession(request, pool);
+    if (!resolved) {
+      return sendApiError(reply, request, 401, 'UNAUTHORIZED', 'auth.unauthorized');
+    }
+    if (!verifyCsrfProtection(request, resolved.session)) {
+      return sendApiError(reply, request, 403, 'CSRF_INVALID', 'auth.csrfInvalid');
+    }
+
+    const userRateKey = `equipment:user:${resolved.session.userId}`;
+    if (!inventoryRateLimiter.checkAndRecord(userRateKey, clock.nowMs())) {
+      return sendApiError(reply, request, 429, 'RATE_LIMITED', 'hunt.rateLimited');
+    }
+
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(request.params.id)) {
+      return sendApiError(reply, request, 404, 'CHARACTER_NOT_FOUND', 'error.characterNotFound');
+    }
+
+    const char = await findCharacterByIdForUser(pool, request.params.id, resolved.session.userId);
+    if (!char) {
+      return sendApiError(reply, request, 404, 'CHARACTER_NOT_FOUND', 'error.characterNotFound');
+    }
+
+    const parsed = EquipItemRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return sendApiError(reply, request, 400, 'VALIDATION_FAILED', 'auth.validationFailed');
+    }
+
+    const result = await equipInventoryItem(pool, {
+      characterId: char.id,
+      backpackSlot: parsed.data.backpackSlot,
+      equipmentSlot: parsed.data.equipmentSlot,
+      idempotencyKey: parsed.data.idempotencyKey
+    });
+
+    if (result.status === 'SUCCESS') {
+      return reply.code(200).send(
+        EquipItemResponseSchema.parse({
+          characterId: char.id,
+          action: result.action,
+          equipment: result.equipment,
+          inventory: result.inventory,
+          idempotentReplay: result.idempotentReplay
+        })
+      );
+    }
+
+    if (result.status === 'ACTIVE_HUNT_LOCKED') {
+      return sendApiError(
+        reply,
+        request,
+        409,
+        'ACTIVE_HUNT_LOCKED',
+        'error.activeHuntEquipmentLocked'
+      );
+    }
+    if (result.status === 'IDEMPOTENCY_KEY_CONFLICT') {
+      return sendApiError(
+        reply,
+        request,
+        409,
+        'IDEMPOTENCY_KEY_CONFLICT',
+        'error.idempotencyConflict'
+      );
+    }
+    if (result.status === 'SLOT_EMPTY') {
+      return sendApiError(reply, request, 400, 'SLOT_EMPTY', 'error.slotEmpty');
+    }
+    if (result.status === 'NOT_EQUIPMENT') {
+      return sendApiError(reply, request, 400, 'NOT_EQUIPMENT', 'error.notEquipment');
+    }
+    if (result.status === 'SLOT_MISMATCH') {
+      return sendApiError(reply, request, 400, 'SLOT_MISMATCH', 'error.slotMismatch');
+    }
+    if (result.status === 'LEVEL_TOO_LOW') {
+      return sendApiError(reply, request, 400, 'LEVEL_TOO_LOW', 'error.levelTooLow');
+    }
+    if (result.status === 'VOCATION_INCOMPATIBLE') {
+      return sendApiError(reply, request, 400, 'VOCATION_INCOMPATIBLE', 'error.vocationIncompatible');
+    }
+    return sendApiError(reply, request, 404, 'CHARACTER_NOT_FOUND', 'error.characterNotFound');
+  });
+
+  app.post<{ Params: { id: string } }>('/characters/:id/equipment/unequip', async (request, reply) => {
+    const pool = requirePool(request, reply);
+    if (!pool) return;
+
+    const resolved = await resolveActiveSession(request, pool);
+    if (!resolved) {
+      return sendApiError(reply, request, 401, 'UNAUTHORIZED', 'auth.unauthorized');
+    }
+    if (!verifyCsrfProtection(request, resolved.session)) {
+      return sendApiError(reply, request, 403, 'CSRF_INVALID', 'auth.csrfInvalid');
+    }
+
+    const userRateKey = `equipment:user:${resolved.session.userId}`;
+    if (!inventoryRateLimiter.checkAndRecord(userRateKey, clock.nowMs())) {
+      return sendApiError(reply, request, 429, 'RATE_LIMITED', 'hunt.rateLimited');
+    }
+
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(request.params.id)) {
+      return sendApiError(reply, request, 404, 'CHARACTER_NOT_FOUND', 'error.characterNotFound');
+    }
+
+    const char = await findCharacterByIdForUser(pool, request.params.id, resolved.session.userId);
+    if (!char) {
+      return sendApiError(reply, request, 404, 'CHARACTER_NOT_FOUND', 'error.characterNotFound');
+    }
+
+    const parsed = UnequipItemRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return sendApiError(reply, request, 400, 'VALIDATION_FAILED', 'auth.validationFailed');
+    }
+
+    const result = await unequipInventoryItem(pool, {
+      characterId: char.id,
+      equipmentSlot: parsed.data.equipmentSlot,
+      targetBackpackSlot: parsed.data.targetBackpackSlot,
+      idempotencyKey: parsed.data.idempotencyKey
+    });
+
+    if (result.status === 'SUCCESS') {
+      return reply.code(200).send(
+        UnequipItemResponseSchema.parse({
+          characterId: char.id,
+          action: result.action,
+          equipment: result.equipment,
+          inventory: result.inventory,
+          idempotentReplay: result.idempotentReplay
+        })
+      );
+    }
+
+    if (result.status === 'ACTIVE_HUNT_LOCKED') {
+      return sendApiError(
+        reply,
+        request,
+        409,
+        'ACTIVE_HUNT_LOCKED',
+        'error.activeHuntEquipmentLocked'
+      );
+    }
+    if (result.status === 'IDEMPOTENCY_KEY_CONFLICT') {
+      return sendApiError(
+        reply,
+        request,
+        409,
+        'IDEMPOTENCY_KEY_CONFLICT',
+        'error.idempotencyConflict'
+      );
+    }
+    if (result.status === 'SLOT_EMPTY') {
+      return sendApiError(reply, request, 400, 'SLOT_EMPTY', 'error.slotEmpty');
+    }
+    if (result.status === 'BACKPACK_FULL') {
+      return sendApiError(reply, request, 400, 'BACKPACK_FULL', 'error.inventoryFull');
+    }
+    if (result.status === 'TARGET_SLOT_OCCUPIED') {
+      return sendApiError(reply, request, 400, 'TARGET_SLOT_OCCUPIED', 'error.targetSlotOccupied');
+    }
+    return sendApiError(reply, request, 404, 'CHARACTER_NOT_FOUND', 'error.characterNotFound');
+  });
 
   return app;
 }

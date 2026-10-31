@@ -209,11 +209,11 @@ describe('@tibia-idle/domain smoke & unit tests', () => {
 
     // 1. Empty equipment baseline equals BASE_KNIGHT_COMBAT_STATS exactly
     const emptyStats = calculateEffectiveCombatStats(knight, []);
-    expect(emptyStats.weaponAttack).toEqual({ base: 18, bonus: 0, effective: 18 });
-    expect(emptyStats.shieldDefense).toEqual({ base: 16, bonus: 0, effective: 16 });
-    expect(emptyStats.totalArmor).toEqual({ base: 10, bonus: 0, effective: 10 });
-    expect(emptyStats.critChancePermille).toEqual({ base: 50, bonus: 0, effective: 50 });
-    expect(emptyStats.critMultiplierPermille).toEqual({ base: 1250, bonus: 0, effective: 1250 });
+    expect(emptyStats.weaponAttack).toEqual({ base: BASE_KNIGHT_COMBAT_STATS.weaponAttack, bonus: 0, effective: 18 });
+    expect(emptyStats.shieldDefense).toEqual({ base: BASE_KNIGHT_COMBAT_STATS.shieldDefense, bonus: 0, effective: 16 });
+    expect(emptyStats.totalArmor).toEqual({ base: BASE_KNIGHT_COMBAT_STATS.totalArmor, bonus: 0, effective: 10 });
+    expect(emptyStats.critChancePermille).toEqual({ base: BASE_KNIGHT_COMBAT_STATS.critChancePermille, bonus: 0, effective: 50 });
+    expect(emptyStats.critMultiplierPermille).toEqual({ base: BASE_KNIGHT_COMBAT_STATS.critMultiplierPermille, bonus: 0, effective: 1250 });
 
     // 2. Rusted blade equipped -> attack 18 + 4 = 22
     const weaponStats = calculateEffectiveCombatStats(knight, [{ itemId: 'rusted-blade' }]);
