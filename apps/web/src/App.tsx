@@ -29,7 +29,6 @@ import {
   type ZoneCatalogDto,
   type ZonesCatalogResponseDto
 } from '@tibia-idle/contracts';
-import { getItemDefinition } from '@tibia-idle/domain';
 import {
   DEFAULT_LOCALE,
   isSupportedLocale,
@@ -1256,8 +1255,8 @@ export function App({
             minute: '2-digit',
             second: '2-digit'
           });
-          const itemDef = getItemDefinition(data.itemId);
-          const itemName = itemDef ? t(locale, itemDef.nameKey as TranslationKey) : data.itemId;
+          const itemSlot = inventory?.slots.find((s) => s.itemId === data.itemId);
+          const itemName = itemSlot ? t(locale, itemSlot.nameKey as TranslationKey) : data.itemId;
           setDynamicLogEntries((prev) => [
             ...prev,
             {

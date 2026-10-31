@@ -5,7 +5,6 @@
   "type": "module",
   "dependencies": {
     "@tibia-idle/contracts": "workspace:*",
-    "@tibia-idle/domain": "workspace:*",
     "@tibia-idle/i18n": "workspace:*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

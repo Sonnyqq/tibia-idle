@@ -27,7 +27,7 @@ describe('IDLE-004B-1 — Persistent Offline Hunts, Settlement Atomicity, Concur
 
   beforeAll(async () => {
     await pool.query(
-      'DROP TABLE IF EXISTS currency_ledger, hunt_reward_items, hunt_segments, hunts, characters, sessions, users, schema_migrations CASCADE'
+      'DROP TABLE IF EXISTS npc_transaction_lines, npc_transactions, inventory_movements, inventory_instances, inventory_containers, currency_ledger, hunt_reward_items, hunt_segments, hunts, characters, sessions, users, schema_migrations CASCADE'
     );
     const migrations = loadMigrationsFromDir();
     await applyMigrations(pool, migrations);

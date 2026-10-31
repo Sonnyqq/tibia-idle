@@ -1715,7 +1715,7 @@ export async function reconcileCharacterEconomy(
     `SELECT amount, balance_after
      FROM currency_ledger
      WHERE character_id = $1
-     ORDER BY created_at ASC, balance_after ASC, id ASC`,
+     ORDER BY sequence_id ASC`,
     [characterId]
   );
 

@@ -793,3 +793,5 @@ export const NpcShopHistoryResponseSchema = z.object({
 });
 export type NpcShopHistoryResponseDto = z.infer<typeof NpcShopHistoryResponseSchema>;
 
+export * from './npc-shop.js';
+

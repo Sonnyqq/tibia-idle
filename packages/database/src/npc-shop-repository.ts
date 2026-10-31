@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
   type BuyNpcProductResponseDto,
-  type CharacterInventoryResponseDto,
   type NpcTransactionDto,
   type SellNpcItemResponseDto
 } from '@tibia-idle/contracts';

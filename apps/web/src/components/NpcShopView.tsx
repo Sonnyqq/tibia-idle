@@ -1,17 +1,12 @@
 import {
-  type CharacterInventoryResponseDto,
-  type InventorySlotItemDto,
-  type NpcTransactionDto
-} from '@tibia-idle/contracts';
-import {
   calculateNpcBuyCost,
   calculateNpcSellPayout,
-  DEFAULT_NPC_MERCHANT,
-  getItemDefinition,
+  type CharacterInventoryResponseDto,
   getNpcSellOffer,
-  isItemSellable
-} from '@tibia-idle/domain';
-import { type SupportedLocale, t } from '@tibia-idle/i18n';
+  isItemSellable,
+  type NpcTransactionDto
+} from '@tibia-idle/contracts';
+import { type SupportedLocale, t, type TranslationKey } from '@tibia-idle/i18n';
 import { useMemo, useState } from 'react';
 import { GameIcon } from '../assets/assetRegistry.js';
 import {
@@ -330,8 +325,7 @@ export function NpcShopView({
             ) : (
               <div className="game-shop-sell-list">
                 {sellableItems.map(({ slotIndex, item, offer }) => {
-                  const itemDef = getItemDefinition(item.itemId);
-                  const itemName = itemDef ? t(locale, itemDef.nameKey as any) : item.itemId;
+                  const itemName = t(locale, item.nameKey as TranslationKey);
                   const unitPrice = offer ? offer.unitPriceGold : 0;
                   const currentQty = getSellQty(slotIndex, item.quantity);
                   const payoutRes = calculateNpcSellPayout(item.itemId, currentQty);
@@ -346,18 +340,14 @@ export function NpcShopView({
                       <div className="game-shop-sell-item-header">
                         <ItemSlot
                           slotId={`shop-sell-slot-${slotIndex}`}
-                          asset={
-                            itemDef
-                              ? {
-                                  assetId: itemDef.assetId,
-                                  category: 'item',
-                                  fallbackIconKey: itemDef.fallbackIconKey
-                                }
-                              : undefined
-                          }
-                          iconKey={itemDef?.fallbackIconKey ?? 'chest'}
+                          asset={{
+                            assetId: item.assetId,
+                            category: 'item',
+                            fallbackIconKey: item.fallbackIconKey
+                          }}
+                          iconKey={item.fallbackIconKey}
                           stackCount={item.quantity}
-                          rarity={itemDef?.rarity ?? 'common'}
+                          rarity={item.rarity}
                           label={itemName}
                         />
                         <div className="game-shop-sell-item-info">
