@@ -1,4 +1,5 @@
 import {
+  type CharacterEquipmentResponseDto,
   type CharacterHuntRewardItemDto,
   type CharacterInventoryResponseDto,
   type EquipmentSlotDto,
@@ -12,11 +13,14 @@ import { GameButton, GameTooltip, GameWindow, ItemSlot } from './ui/GameUi.js';
 export interface InventoryViewProps {
   locale: SupportedLocale;
   inventory: CharacterInventoryResponseDto | null;
+  equipment: CharacterEquipmentResponseDto | null;
   rewardItems: readonly CharacterHuntRewardItemDto[];
   onClaimReward: (rewardId: string) => Promise<void>;
   claimingRewardId?: string | null | undefined;
   onMoveItem: (fromSlot: number, toSlot: number) => Promise<void>;
   onSplitStack: (fromSlot: number, toSlot: number, quantity: number) => Promise<void>;
+  onEquipItem: (backpackSlot: number, equipmentSlot: EquipmentSlotDto) => Promise<void>;
+  onUnequipItem: (equipmentSlot: EquipmentSlotDto) => Promise<void>;
   actionLoading?: boolean | undefined;
 }
 
@@ -35,11 +39,14 @@ const PAPERDOLL_GRID_ORDER: readonly EquipmentSlotDto[] = [
 export function InventoryView({
   locale,
   inventory,
+  equipment,
   rewardItems,
   onClaimReward,
   claimingRewardId,
   onMoveItem,
   onSplitStack,
+  onEquipItem,
+  onUnequipItem,
   actionLoading = false
 }: InventoryViewProps) {
   const [selectedPaperdollSlot, setSelectedPaperdollSlot] =
@@ -49,7 +56,6 @@ export function InventoryView({
   const [isSplitting, setIsSplitting] = useState<boolean>(false);
   const isSubmittingRef = useRef<boolean>(false);
 
-  const paperdollLabel = t(locale, EQUIPMENT_SLOT_KEY_MAP[selectedPaperdollSlot]);
   const emptyText = t(locale, 'inventory.slotEmpty');
 
   const containerSlots = Array.from({ length: 20 }, (_, idx) => idx);
@@ -62,6 +68,7 @@ export function InventoryView({
 
   const selectedItem =
     selectedBackpackSlot !== null ? (slotMap.get(selectedBackpackSlot) ?? null) : null;
+  const equippedInSelectedSlot = equipment?.slots[selectedPaperdollSlot] ?? null;
 
   const handleBackpackSlotClick = async (slotIndex: number) => {
     if (actionLoading || isSubmittingRef.current) return;
@@ -128,6 +135,28 @@ export function InventoryView({
     }
   };
 
+  const handleEquipClick = async (backpackSlot: number, slot: EquipmentSlotDto) => {
+    if (actionLoading || isSubmittingRef.current || equipment?.activeHuntLocked) return;
+    isSubmittingRef.current = true;
+    try {
+      await onEquipItem(backpackSlot, slot);
+      setSelectedBackpackSlot(null);
+      setSelectedPaperdollSlot(slot);
+    } finally {
+      isSubmittingRef.current = false;
+    }
+  };
+
+  const handleUnequipClick = async (slot: EquipmentSlotDto) => {
+    if (actionLoading || isSubmittingRef.current || equipment?.activeHuntLocked) return;
+    isSubmittingRef.current = true;
+    try {
+      await onUnequipItem(slot);
+    } finally {
+      isSubmittingRef.current = false;
+    }
+  };
+
   const unclaimedRewards = rewardItems.filter((r) => r.ownershipState === 'UNCLAIMED');
 
   const cap = inventory?.capacity ?? {
@@ -152,25 +181,44 @@ export function InventoryView({
           expandLabel={t(locale, 'window.expand')}
         >
           <div className="subwindow-title">{t(locale, 'inventory.paperdollTitle')}</div>
+
+          {equipment?.activeHuntLocked && (
+            <div className="active-hunt-lock-notice" data-testid="active-hunt-equipment-locked">
+              {t(locale, 'inventory.activeHuntLocked')}
+            </div>
+          )}
+
           <div className="paperdoll-frame">
             <div
               className="paperdoll-grid"
+              data-testid="paperdoll-grid"
               role="group"
               aria-label={t(locale, 'inventory.equipmentTitle')}
             >
               {PAPERDOLL_GRID_ORDER.map((slot) => {
                 const label = t(locale, EQUIPMENT_SLOT_KEY_MAP[slot]);
+                const equipped = equipment?.slots[slot] ?? null;
+                const isSelected = selectedPaperdollSlot === slot && selectedBackpackSlot === null;
+
                 return (
                   <div key={slot} className={`paperdoll-cell slot-${slot}`}>
                     <ItemSlot
                       testId={`equip-slot-${slot}`}
                       slotId={slot}
-                      label={`${label} — ${emptyText}`}
-                      iconKey={slot}
-                      category="equipment"
-                      state="empty"
-                      selected={selectedPaperdollSlot === slot}
-                      onSelect={() => setSelectedPaperdollSlot(slot)}
+                      label={
+                        equipped
+                          ? `${label} — ${t(locale, equipped.nameKey as TranslationKey)}`
+                          : `${label} — ${emptyText}`
+                      }
+                      iconKey={equipped ? equipped.fallbackIconKey : slot}
+                      category={equipped ? 'item' : 'equipment'}
+                      state={equipped ? (isSelected ? 'selected' : 'occupied') : (isSelected ? 'selected' : 'empty')}
+                      {...(equipped ? { rarity: equipped.rarity } : {})}
+                      selected={isSelected}
+                      onSelect={() => {
+                        setSelectedPaperdollSlot(slot);
+                        setSelectedBackpackSlot(null);
+                      }}
                     />
                     <span className="paperdoll-slot-name">{label}</span>
                   </div>
@@ -179,18 +227,50 @@ export function InventoryView({
             </div>
           </div>
 
-          <p className="window-muted-note">{t(locale, 'inventory.paperdollNotice')}</p>
-
+          {/* Paperdoll Slot Inspector */}
           <div data-testid="inventory-slot-tooltip" className="slot-inspector-wrapper">
-            <GameTooltip
-              data={{
-                title: paperdollLabel,
-                subtitle: emptyText,
-                description: t(locale, 'inventory.slotTooltipHint'),
-                source: t(locale, 'inventory.catalogNote')
-              }}
-              closeLabel={t(locale, 'tooltip.close')}
-            />
+            {equippedInSelectedSlot ? (
+              <div className="equipped-slot-inspector" data-testid="equipped-slot-inspector">
+                <GameTooltip
+                  data={{
+                    title: t(locale, equippedInSelectedSlot.nameKey as TranslationKey),
+                    subtitle: `${t(locale, EQUIPMENT_SLOT_KEY_MAP[selectedPaperdollSlot])} • ${t(
+                      locale,
+                      RARITY_KEY_MAP[equippedInSelectedSlot.rarity]
+                    )}`,
+                    description: `${t(locale, 'inventory.weightLabel')}: ${
+                      equippedInSelectedSlot.totalWeight
+                    } ${t(locale, 'inventory.weightUnit')}${
+                      equippedInSelectedSlot.requiredLevel
+                        ? ` • ${t(locale, 'tooltip.requiredLevel')}: ${equippedInSelectedSlot.requiredLevel}`
+                        : ''
+                    }`,
+                    source: t(locale, 'tooltip.equipped')
+                  }}
+                  closeLabel={t(locale, 'tooltip.close')}
+                />
+                <div className="equipped-item-actions">
+                  <GameButton
+                    variant="default"
+                    onClick={() => void handleUnequipClick(selectedPaperdollSlot)}
+                    disabled={actionLoading || equipment?.activeHuntLocked}
+                    testId="unequip-item-btn"
+                  >
+                    {t(locale, 'inventory.unequip')}
+                  </GameButton>
+                </div>
+              </div>
+            ) : (
+              <GameTooltip
+                data={{
+                  title: t(locale, EQUIPMENT_SLOT_KEY_MAP[selectedPaperdollSlot]),
+                  subtitle: emptyText,
+                  description: t(locale, 'inventory.slotTooltipHint'),
+                  source: t(locale, 'inventory.equipment')
+                }}
+                closeLabel={t(locale, 'tooltip.close')}
+              />
+            )}
           </div>
         </GameWindow>
 
@@ -263,7 +343,64 @@ export function InventoryView({
                     {t(locale, 'inventory.weightLabel')}: {selectedItem.totalWeight}{' '}
                     {t(locale, 'inventory.weightUnit')}
                   </span>
+                  {selectedItem.equipmentSlot && (
+                    <span className="game-tag">
+                      {t(locale, EQUIPMENT_SLOT_KEY_MAP[selectedItem.equipmentSlot])}
+                    </span>
+                  )}
                 </div>
+
+                {/* Stat comparison when equippable */}
+                {selectedItem.itemType === 'equipment' && selectedItem.equipmentSlot && (
+                  <div className="stat-comparison-box" data-testid="stat-comparison-box">
+                    {(() => {
+                      const curEquipped = equipment?.slots[selectedItem.equipmentSlot];
+                      const curAtk = curEquipped?.combatBonuses?.weaponAttack ?? 0;
+                      const newAtk = selectedItem.combatBonuses?.weaponAttack ?? 0;
+                      const diffAtk = newAtk - curAtk;
+
+                      const curDef = curEquipped?.combatBonuses?.shieldDefense ?? 0;
+                      const newDef = selectedItem.combatBonuses?.shieldDefense ?? 0;
+                      const diffDef = newDef - curDef;
+
+                      const curArm = curEquipped?.combatBonuses?.totalArmor ?? 0;
+                      const newArm = selectedItem.combatBonuses?.totalArmor ?? 0;
+                      const diffArm = newArm - curArm;
+
+                      const curCrit = curEquipped?.combatBonuses?.critChancePermille ?? 0;
+                      const newCrit = selectedItem.combatBonuses?.critChancePermille ?? 0;
+                      const diffCrit = newCrit - curCrit;
+
+                      return (
+                        <div className="stat-diff-row">
+                          {diffAtk !== 0 && (
+                            <span
+                              className={diffAtk > 0 ? 'stat-diff-positive' : 'stat-diff-negative'}
+                              data-testid="stat-diff-attack"
+                            >
+                              {t(locale, 'character.attack')} {diffAtk > 0 ? `+${diffAtk}` : diffAtk}
+                            </span>
+                          )}
+                          {diffDef !== 0 && (
+                            <span className={diffDef > 0 ? 'stat-diff-positive' : 'stat-diff-negative'}>
+                              {t(locale, 'character.defense')} {diffDef > 0 ? `+${diffDef}` : diffDef}
+                            </span>
+                          )}
+                          {diffArm !== 0 && (
+                            <span className={diffArm > 0 ? 'stat-diff-positive' : 'stat-diff-negative'}>
+                              {t(locale, 'character.armor')} {diffArm > 0 ? `+${diffArm}` : diffArm}
+                            </span>
+                          )}
+                          {diffCrit !== 0 && (
+                            <span className={diffCrit > 0 ? 'stat-diff-positive' : 'stat-diff-negative'}>
+                              {t(locale, 'character.critChance')} {diffCrit > 0 ? `+${(diffCrit / 10).toFixed(1)}%` : `${(diffCrit / 10).toFixed(1)}%`}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
 
                 {isSplitting ? (
                   <div className="split-controls-box" data-testid="split-controls-box">
@@ -302,10 +439,23 @@ export function InventoryView({
                   </div>
                 ) : (
                   <div className="selected-item-actions">
-                    <span className="window-muted-note">
-                      {t(locale, 'inventory.selectTargetSlotPrompt')}
-                    </span>
                     <div className="selected-buttons-row">
+                      {selectedItem.itemType === 'equipment' &&
+                        selectedItem.equipmentSlot &&
+                        selectedBackpackSlot !== null && (
+                          <GameButton
+                            variant="primary"
+                            onClick={() => {
+                              if (selectedBackpackSlot !== null && selectedItem.equipmentSlot) {
+                                void handleEquipClick(selectedBackpackSlot, selectedItem.equipmentSlot);
+                              }
+                            }}
+                            disabled={actionLoading || equipment?.activeHuntLocked}
+                            testId="equip-item-btn"
+                          >
+                            {t(locale, 'inventory.equip')}
+                          </GameButton>
+                        )}
                       {selectedItem.stackable && selectedItem.quantity > 1 && (
                         <GameButton
                           variant="default"

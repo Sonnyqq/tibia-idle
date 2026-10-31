@@ -12,6 +12,7 @@ import {
   assertNoRngLeakInPublicPayload,
   calculateCharacterVitalsForLevel,
   CATALOG_ITEMS_MAP,
+  calculateEffectiveCombatStats,
   type Clock,
   type CombatCharacterSnapshot,
   type CombatCheckpointState,
@@ -21,7 +22,6 @@ import {
   createSystemClock,
   DEFAULT_COMBAT_RESOURCES,
   DEFAULT_COMBAT_SIMULATION_CONFIG,
-  DEFAULT_KNIGHT_EQUIPMENT,
   deserializeCombatCheckpoint,
   generateCryptographicHuntSeed,
   HUNT_STRATEGIES,
@@ -561,6 +561,25 @@ export async function startHunt(
       return { ok: false, reason: 'INVALID_RESOURCE_REQUEST' };
     }
 
+    const eqContainerRes = await client.query<{ id: string }>(
+      `SELECT id FROM inventory_containers WHERE character_id = $1 AND container_type = 'equipment' LIMIT 1`,
+      [charRow.id]
+    );
+    let effectiveStats = calculateEffectiveCombatStats(
+      { vocation: charRow.vocation, level: charLevel },
+      []
+    );
+    if (eqContainerRes.rows[0]) {
+      const eqItemsRes = await client.query<{ item_id: string }>(
+        `SELECT item_id FROM inventory_instances WHERE character_id = $1 AND container_id = $2`,
+        [charRow.id, eqContainerRes.rows[0].id]
+      );
+      effectiveStats = calculateEffectiveCombatStats(
+        { vocation: charRow.vocation, level: charLevel },
+        eqItemsRes.rows.map((r) => ({ itemId: r.item_id }))
+      );
+    }
+
     const characterSnapshot: CombatCharacterSnapshot = {
       characterId: charRow.id,
       vocation: charRow.vocation,
@@ -573,7 +592,13 @@ export async function startHunt(
       melee: Number(charRow.skill_melee),
       shielding: Number(charRow.skill_shielding),
       magic: Number(charRow.skill_magic),
-      equipment: DEFAULT_KNIGHT_EQUIPMENT
+      equipment: {
+        weaponAttack: effectiveStats.weaponAttack.effective,
+        shieldDefense: effectiveStats.shieldDefense.effective,
+        totalArmor: effectiveStats.totalArmor.effective,
+        critChancePermille: effectiveStats.critChancePermille.effective,
+        critMultiplierPermille: effectiveStats.critMultiplierPermille.effective
+      }
     };
 
     const resourceLoadout: CombatResourceLoadout = {

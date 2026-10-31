@@ -1,10 +1,36 @@
 import {
+  type CharacterCombatStatsDto,
   type CharacterInventoryCapacityDto,
+  type EquipmentSlotDto,
   type ItemDefinitionDto,
   type VocationDto
 } from '@tibia-idle/contracts';
 
-export const ITEM_METADATA_VERSION = '1.0.0' as const;
+export const ITEM_METADATA_VERSION = '1.1.0' as const;
+
+export const EQUIPMENT_SLOT_INDICES: Readonly<Record<EquipmentSlotDto, number>> = {
+  helmet: 0,
+  amulet: 1,
+  weapon: 2,
+  armor: 3,
+  shield: 4,
+  ring: 5,
+  legs: 6,
+  boots: 7,
+  ammunition: 8
+};
+
+export const EQUIPMENT_INDEX_TO_SLOT: Readonly<Record<number, EquipmentSlotDto>> = {
+  0: 'helmet',
+  1: 'amulet',
+  2: 'weapon',
+  3: 'armor',
+  4: 'shield',
+  5: 'ring',
+  6: 'legs',
+  7: 'boots',
+  8: 'ammunition'
+};
 
 export const ITEM_DEFINITIONS: readonly ItemDefinitionDto[] = [
   {
@@ -78,6 +104,11 @@ export const ITEM_DEFINITIONS: readonly ItemDefinitionDto[] = [
     maxStackSize: 1,
     weightUnits: 250,
     equipmentSlot: 'weapon',
+    requiredLevel: 1,
+    allowedVocations: ['knight'],
+    combatBonuses: {
+      weaponAttack: 4
+    },
     metadataVersion: ITEM_METADATA_VERSION
   },
   {
@@ -103,6 +134,11 @@ export const ITEM_DEFINITIONS: readonly ItemDefinitionDto[] = [
     maxStackSize: 1,
     weightUnits: 10,
     equipmentSlot: 'ring',
+    requiredLevel: 1,
+    allowedVocations: ['knight', 'paladin', 'sorcerer', 'druid'],
+    combatBonuses: {
+      critChancePermille: 20
+    },
     metadataVersion: ITEM_METADATA_VERSION
   },
   {
@@ -152,6 +188,11 @@ export const ITEM_DEFINITIONS: readonly ItemDefinitionDto[] = [
     maxStackSize: 1,
     weightUnits: 25,
     equipmentSlot: 'amulet',
+    requiredLevel: 1,
+    allowedVocations: ['knight', 'paladin', 'sorcerer', 'druid'],
+    combatBonuses: {
+      totalArmor: 3
+    },
     metadataVersion: ITEM_METADATA_VERSION
   }
 ];
@@ -195,21 +236,131 @@ export function calculateInventoryWeight(
   return total;
 }
 
+export const BASE_KNIGHT_COMBAT_STATS = {
+  weaponAttack: 18,
+  shieldDefense: 16,
+  totalArmor: 10,
+  critChancePermille: 50,
+  critMultiplierPermille: 1250
+} as const;
+
+export function calculateEffectiveCombatStats(
+  character: { readonly vocation: VocationDto; readonly level: number },
+  equippedItems: readonly { readonly itemId: string }[]
+): CharacterCombatStatsDto {
+  const isKnight = character.vocation === 'knight';
+  const base = isKnight
+    ? BASE_KNIGHT_COMBAT_STATS
+    : {
+        weaponAttack: 10,
+        shieldDefense: 10,
+        totalArmor: 5,
+        critChancePermille: 50,
+        critMultiplierPermille: 1250
+      };
+
+  let bonusWeaponAttack = 0;
+  let bonusShieldDefense = 0;
+  let bonusTotalArmor = 0;
+  let bonusCritChancePermille = 0;
+  let bonusCritMultiplierPermille = 0;
+
+  // Stable sort by itemId so calculation order is independent of input order
+  const sortedItems = [...equippedItems].sort((a, b) => a.itemId.localeCompare(b.itemId));
+
+  for (const item of sortedItems) {
+    const def = getItemDefinition(item.itemId);
+    if (!def || !def.combatBonuses) continue;
+
+    // Check level & vocation requirement
+    const requiredLevel = def.requiredLevel ?? 1;
+    if (character.level < requiredLevel) continue;
+    if (def.allowedVocations && !def.allowedVocations.includes(character.vocation)) continue;
+
+    // For non-knight vocations, do not show unhandled combat bonuses as active
+    if (!isKnight) continue;
+
+    bonusWeaponAttack += def.combatBonuses.weaponAttack ?? 0;
+    bonusShieldDefense += def.combatBonuses.shieldDefense ?? 0;
+    bonusTotalArmor += def.combatBonuses.totalArmor ?? 0;
+    bonusCritChancePermille += def.combatBonuses.critChancePermille ?? 0;
+    bonusCritMultiplierPermille += def.combatBonuses.critMultiplierPermille ?? 0;
+  }
+
+  const effectiveWeaponAttack = Math.min(1_000_000, Math.max(1, base.weaponAttack + bonusWeaponAttack));
+  const effectiveShieldDefense = Math.min(1_000_000, Math.max(0, base.shieldDefense + bonusShieldDefense));
+  const effectiveTotalArmor = Math.min(1_000_000, Math.max(0, base.totalArmor + bonusTotalArmor));
+  const effectiveCritChancePermille = Math.min(1000, Math.max(0, base.critChancePermille + bonusCritChancePermille));
+  const effectiveCritMultiplierPermille = Math.min(
+    10_000,
+    Math.max(1000, base.critMultiplierPermille + bonusCritMultiplierPermille)
+  );
+
+  return {
+    weaponAttack: {
+      base: base.weaponAttack,
+      bonus: bonusWeaponAttack,
+      effective: effectiveWeaponAttack
+    },
+    shieldDefense: {
+      base: base.shieldDefense,
+      bonus: bonusShieldDefense,
+      effective: effectiveShieldDefense
+    },
+    totalArmor: {
+      base: base.totalArmor,
+      bonus: bonusTotalArmor,
+      effective: effectiveTotalArmor
+    },
+    critChancePermille: {
+      base: base.critChancePermille,
+      bonus: bonusCritChancePermille,
+      effective: effectiveCritChancePermille
+    },
+    critMultiplierPermille: {
+      base: base.critMultiplierPermille,
+      bonus: bonusCritMultiplierPermille,
+      effective: effectiveCritMultiplierPermille
+    }
+  };
+}
+
+export function calculateCharacterCarriedWeight(
+  backpackItems: readonly { readonly itemId: string; readonly quantity: number }[],
+  equippedItems: readonly { readonly itemId: string; readonly quantity?: number | undefined }[] = []
+): number {
+  const backpackWeight = calculateInventoryWeight(backpackItems);
+  const equippedWeight = calculateInventoryWeight(
+    equippedItems.map((e) => ({ itemId: e.itemId, quantity: e.quantity ?? 1 }))
+  );
+  return backpackWeight + equippedWeight;
+}
+
 export function calculateInventoryCapacity(
   vocation: VocationDto,
   level: number,
-  items: readonly { readonly itemId: string; readonly quantity: number }[],
+  backpackItems: readonly { readonly itemId: string; readonly quantity: number }[],
+  equippedItemsOrSlotCapacity:
+    | readonly { readonly itemId: string; readonly quantity?: number | undefined }[]
+    | number = [],
   slotCapacity = 20
 ): CharacterInventoryCapacityDto {
+  const equippedItems = Array.isArray(equippedItemsOrSlotCapacity)
+    ? equippedItemsOrSlotCapacity
+    : [];
+  const maxSlots =
+    typeof equippedItemsOrSlotCapacity === 'number'
+      ? equippedItemsOrSlotCapacity
+      : slotCapacity;
   const maxWeight = calculateCharacterMaxCapacity(vocation, level);
-  const currentWeight = calculateInventoryWeight(items);
+  const currentWeight = calculateCharacterCarriedWeight(backpackItems, equippedItems);
   const remainingCapacity = Math.max(0, maxWeight - currentWeight);
-  const occupiedSlots = items.length;
+  const occupiedSlots = backpackItems.length;
   return {
     currentWeight,
     maxWeight,
     remainingCapacity,
     occupiedSlots,
-    maxSlots: slotCapacity
+    maxSlots
   };
 }

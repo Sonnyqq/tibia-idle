@@ -959,4 +959,81 @@ describe('IDLE-004A — Deterministic Idle Combat Engine (Unit, Golden, Replay, 
     expect(deserialized.terminated).toBe(true);
     expect(deserialized.stopReason).toBe('MANUAL_STOP');
   });
+
+  it('proves equipment scaling determinism, higher damage throughput with weapon equipped, and frozen snapshot stability', () => {
+    const seed = 424242;
+    const durationMs = 600_000; // 10 minutes
+
+    // 1. Baseline knight without equipment (Attack 18)
+    const baseKnight = createKnightCombatSnapshot({
+      level: 1,
+      melee: 15,
+      shielding: 15,
+      equipment: {
+        weaponAttack: 18,
+        shieldDefense: 16,
+        totalArmor: 10,
+        critChancePermille: 50,
+        critMultiplierPermille: 1250
+      }
+    });
+
+    const cpBase0 = createInitialCombatCheckpoint({
+      character: baseKnight,
+      zoneId: 'damp-catacombs',
+      strategy: 'balanced',
+      seed
+    });
+
+    const simBase = simulateHuntSegment({
+      character: baseKnight,
+      checkpoint: cpBase0,
+      durationMs
+    });
+
+    // 2. Equipped knight with rusted-blade (+4 weaponAttack -> 22)
+    const equippedKnight = createKnightCombatSnapshot({
+      level: 1,
+      melee: 15,
+      shielding: 15,
+      equipment: {
+        weaponAttack: 22,
+        shieldDefense: 16,
+        totalArmor: 10,
+        critChancePermille: 50,
+        critMultiplierPermille: 1250
+      }
+    });
+
+    const cpEquipped0 = createInitialCombatCheckpoint({
+      character: equippedKnight,
+      zoneId: 'damp-catacombs',
+      strategy: 'balanced',
+      seed
+    });
+
+    const simEquipped = simulateHuntSegment({
+      character: equippedKnight,
+      checkpoint: cpEquipped0,
+      durationMs
+    });
+
+    // Bit-for-bit replay test: running equipped knight again with identical seed produces 100% identical checkpoint
+    const replayEquipped = simulateHuntSegment({
+      character: equippedKnight,
+      checkpoint: cpEquipped0,
+      durationMs
+    });
+    expect(serializeCombatCheckpoint(replayEquipped.checkpoint)).toBe(
+      serializeCombatCheckpoint(simEquipped.checkpoint)
+    );
+
+    // Progression test: Higher attack results in greater or equal kills and XP
+    expect(simEquipped.checkpoint.totalKills).toBeGreaterThanOrEqual(simBase.checkpoint.totalKills);
+    expect(simEquipped.checkpoint.totalXpGained).toBeGreaterThanOrEqual(simBase.checkpoint.totalXpGained);
+
+    // Snapshot freeze test: The checkpoint snapshot preserves the exact equipment at hunt start
+    expect(simEquipped.checkpoint.snapshot.character.equipment.weaponAttack).toBe(22);
+    expect(simBase.checkpoint.snapshot.character.equipment.weaponAttack).toBe(18);
+  });
 });

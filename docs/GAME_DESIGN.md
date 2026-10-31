@@ -52,7 +52,7 @@ Show estimates as ranges until sufficient events. Use controlled data and review
     - **Knight:** `5000 + (level - 1) * 250` oz
     - **Paladin:** `4000 + (level - 1) * 200` oz
     - **Mage (Offensive / Sustain):** `3000 + (level - 1) * 100` oz
-  - Every item definition has a fixed integer weight (e.g. `copper-coin: 1`, `iron-sword: 400`, `rusted-blade: 520`, `health-potion: 25`, `leather-armor: 650`).
+  - Every item definition has a fixed integer weight (e.g. `copper-coin: 1`, `rat-pelt: 5`, `chitin-plate: 20`, `rusted-blade: 250`, `silver-ring: 10`, `ritual-amulet: 25`). Note: `rusted-blade` is balanced at 250 oz.
 - **Starting Backpack & Slots:** Characters are created with a 20-slot starting backpack container (`BACKPACK_STARTING_SLOTS = 20`, `slot_index` 0 to 19).
 - **Stacking, Moving & Splitting:**
   - Stackable items stack up to `maxStackSize = 100` per slot. Non-stackable items occupy 1 item per slot.
@@ -65,6 +65,27 @@ Show estimates as ranges until sufficient events. Use controlled data and review
   - Players claim rewards individually into their backpack via `POST /characters/:id/hunt-rewards/:rewardId/claim`.
   - Server transaction locks the character and reward item (`FOR UPDATE`), verifies character ownership, checks weight capacity (`currentWeight + itemWeight <= maxWeight`) and slot availability, marks the reward `CLAIMED`, inserts/merges into `inventory_instances`, and records an immutable audit record in `inventory_movements` (`movement_type = CLAIM_HUNT_REWARD`).
   - Claim requests require client idempotency keys, guaranteeing zero item duplication across retries, reloads, and network drops.
+
+## Equipment paperdoll & combat stats (`IDLE-005B`)
+- **9 Paperdoll Equipment Slots:**
+  - `helmet`, `amulet`, `weapon`, `armor`, `shield`, `ring`, `legs`, `boots`, `ammunition`.
+  - Stored in persistent `equipment` container (`slot_capacity = 9`, `slot_index` 0 to 8).
+- **Equipment & Weight Model:**
+  - Total carried weight includes both backpack items and equipped items:
+    $$\text{Total Carried Weight} = \sum \text{backpack item weights} + \sum \text{equipped item weights}$$
+  - Equipping an item moves it between containers without changing total carried weight.
+  - Claiming AFK rewards accounts for combined carried weight, preventing reward exploitation with heavy gear.
+- **Combat Stats Calculation (`calculateEffectiveCombatStats`):**
+  - Knight unequipped baseline: Weapon Attack `18`, Shield Defense `16`, Total Armor `10`, Crit Chance `50` permille (5.0%), Crit Multiplier `1250` permille (1.25x).
+  - Equipped items contribute additive bonuses:
+    - `rusted-blade`: Weapon Attack `+4` (req level 1, knight) $\rightarrow$ Effective Attack `22`.
+    - `silver-ring`: Crit Chance `+20` permille (+2.0%) $\rightarrow$ Effective Crit Chance `70` permille (7.0%).
+    - `ritual-amulet`: Total Armor `+3` $\rightarrow$ Effective Total Armor `13`.
+  - Stat comparison in UI displays exact diffs (`+4 Attack`, etc.) when inspecting equippable items.
+- **Active Hunt Safety Lock:**
+  - Starting a hunt freezes equipment stats into `CombatCharacterSnapshot`.
+  - Equip, unequip, and slot swap operations are strictly rejected (`ACTIVE_HUNT_LOCKED`, HTTP 409) while a character has an active hunt session.
+  - Stopping the hunt completely restores the ability to modify equipment for the next hunt.
 
 ## Localization
 Use keys, pluralization, locale-aware numbers and dates; avoid embedding English or Polish text in logic. Players can change locale anytime; account/global content IDs remain language-neutral. Initial locales `pl-PL`, `en-US`.
