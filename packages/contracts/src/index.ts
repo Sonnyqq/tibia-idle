@@ -489,6 +489,19 @@ export type ApiErrorDto = z.infer<typeof ApiErrorSchema>;
 export const ItemTypeSchema = z.enum(['material', 'loot', 'equipment', 'consumable', 'currency']);
 export type ItemTypeDto = z.infer<typeof ItemTypeSchema>;
 
+export const ItemCombatBonusesSchema = z.object({
+  weaponAttack: z.number().int().min(0).optional(),
+  shieldDefense: z.number().int().min(0).optional(),
+  totalArmor: z.number().int().min(0).optional(),
+  critChancePermille: z.number().int().min(0).max(1000).optional(),
+  critMultiplierPermille: z.number().int().min(0).max(10_000).optional(),
+  meleeBonus: z.number().int().min(0).optional(),
+  shieldingBonus: z.number().int().min(0).optional(),
+  maxHpBonus: z.number().int().min(0).optional(),
+  maxMpBonus: z.number().int().min(0).optional()
+});
+export type ItemCombatBonusesDto = z.infer<typeof ItemCombatBonusesSchema>;
+
 export const ItemDefinitionSchema = z.object({
   itemId: z.string().min(1),
   nameKey: z.string().min(1),
@@ -500,6 +513,9 @@ export const ItemDefinitionSchema = z.object({
   maxStackSize: z.number().int().min(1),
   weightUnits: z.number().int().min(0),
   equipmentSlot: EquipmentSlotSchema.optional(),
+  requiredLevel: z.number().int().min(1).max(10_000).optional(),
+  allowedVocations: z.array(VocationSchema).optional(),
+  combatBonuses: ItemCombatBonusesSchema.optional(),
   metadataVersion: z.string().min(1)
 });
 export type ItemDefinitionDto = z.infer<typeof ItemDefinitionSchema>;
@@ -519,6 +535,10 @@ export const InventorySlotItemSchema = z.object({
   weightUnits: z.number().int().min(0),
   totalWeight: z.number().int().min(0),
   quantity: z.number().int().min(1),
+  equipmentSlot: EquipmentSlotSchema.optional(),
+  requiredLevel: z.number().int().min(1).max(10_000).optional(),
+  allowedVocations: z.array(VocationSchema).optional(),
+  combatBonuses: ItemCombatBonusesSchema.optional(),
   rowVersion: z.number().int().min(1)
 });
 export type InventorySlotItemDto = z.infer<typeof InventorySlotItemSchema>;
@@ -526,7 +546,7 @@ export type InventorySlotItemDto = z.infer<typeof InventorySlotItemSchema>;
 export const InventoryContainerSchema = z.object({
   id: z.string().uuid(),
   characterId: z.string().uuid(),
-  containerType: z.literal('backpack'),
+  containerType: z.enum(['backpack', 'equipment']),
   slotCapacity: z.number().int().min(1).max(100),
   occupiedSlots: z.number().int().min(0),
   rowVersion: z.number().int().min(1)
@@ -601,3 +621,86 @@ export const ClaimHuntRewardResponseSchema = z.object({
   idempotentReplay: z.boolean()
 });
 export type ClaimHuntRewardResponseDto = z.infer<typeof ClaimHuntRewardResponseSchema>;
+
+// ==========================================
+// P04B / IDLE-005B: Equipment & Combat Stats
+// ==========================================
+
+export const CombatStatBreakdownSchema = z.object({
+  base: z.number().int(),
+  bonus: z.number().int(),
+  effective: z.number().int()
+});
+export type CombatStatBreakdownDto = z.infer<typeof CombatStatBreakdownSchema>;
+
+export const CharacterCombatStatsSchema = z.object({
+  weaponAttack: CombatStatBreakdownSchema,
+  shieldDefense: CombatStatBreakdownSchema,
+  totalArmor: CombatStatBreakdownSchema,
+  critChancePermille: CombatStatBreakdownSchema,
+  critMultiplierPermille: CombatStatBreakdownSchema
+});
+export type CharacterCombatStatsDto = z.infer<typeof CharacterCombatStatsSchema>;
+
+export const EquippedItemSlotSchema = z.object({
+  slot: EquipmentSlotSchema,
+  instanceId: z.string().uuid(),
+  itemId: z.string().min(1),
+  nameKey: z.string().min(1),
+  rarity: ItemRaritySchema,
+  assetId: z.string().min(1),
+  fallbackIconKey: z.string().min(1),
+  itemType: ItemTypeSchema,
+  stackable: z.boolean(),
+  maxStackSize: z.number().int().min(1),
+  weightUnits: z.number().int().min(0),
+  totalWeight: z.number().int().min(0),
+  quantity: z.number().int().min(1),
+  equipmentSlot: EquipmentSlotSchema,
+  requiredLevel: z.number().int().min(1).max(10_000).optional(),
+  allowedVocations: z.array(VocationSchema).optional(),
+  combatBonuses: ItemCombatBonusesSchema.optional(),
+  rowVersion: z.number().int().min(1)
+});
+export type EquippedItemSlotDto = z.infer<typeof EquippedItemSlotSchema>;
+
+export const CharacterEquipmentResponseSchema = z.object({
+  characterId: z.string().uuid(),
+  slots: z.record(EquipmentSlotSchema, EquippedItemSlotSchema.nullable()),
+  stats: CharacterCombatStatsSchema,
+  activeHuntLocked: z.boolean(),
+  totalEquipmentWeight: z.number().int().min(0)
+});
+export type CharacterEquipmentResponseDto = z.infer<typeof CharacterEquipmentResponseSchema>;
+
+export const EquipItemRequestSchema = z.object({
+  backpackSlot: z.number().int().min(0).max(99),
+  equipmentSlot: EquipmentSlotSchema,
+  idempotencyKey: z.string().min(1).max(128)
+});
+export type EquipItemRequestDto = z.infer<typeof EquipItemRequestSchema>;
+
+export const EquipItemResponseSchema = z.object({
+  characterId: z.string().uuid(),
+  action: z.enum(['EQUIPPED', 'SWAPPED']),
+  equipment: CharacterEquipmentResponseSchema,
+  inventory: CharacterInventoryResponseSchema,
+  idempotentReplay: z.boolean()
+});
+export type EquipItemResponseDto = z.infer<typeof EquipItemResponseSchema>;
+
+export const UnequipItemRequestSchema = z.object({
+  equipmentSlot: EquipmentSlotSchema,
+  targetBackpackSlot: z.number().int().min(0).max(99).optional(),
+  idempotencyKey: z.string().min(1).max(128)
+});
+export type UnequipItemRequestDto = z.infer<typeof UnequipItemRequestSchema>;
+
+export const UnequipItemResponseSchema = z.object({
+  characterId: z.string().uuid(),
+  action: z.literal('UNEQUIPPED'),
+  equipment: CharacterEquipmentResponseSchema,
+  inventory: CharacterInventoryResponseSchema,
+  idempotentReplay: z.boolean()
+});
+export type UnequipItemResponseDto = z.infer<typeof UnequipItemResponseSchema>;

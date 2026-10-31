@@ -1,6 +1,9 @@
 import {
+  BASE_KNIGHT_COMBAT_STATS,
+  calculateCharacterCarriedWeight,
   calculateCharacterMaxCapacity,
   calculateCharacterVitalsForLevel,
+  calculateEffectiveCombatStats,
   calculateInventoryCapacity,
   calculateInventoryWeight,
   calculateLevelXpProgress,
@@ -8,6 +11,8 @@ import {
   createFixedClock,
   createInitialCharacterStats,
   createSeededRng,
+  EQUIPMENT_INDEX_TO_SLOT,
+  EQUIPMENT_SLOT_INDICES,
   getItemDefinition,
   INITIAL_ZONES_CATALOG,
   ITEM_DEFINITIONS,
@@ -191,5 +196,74 @@ describe('@tibia-idle/domain smoke & unit tests', () => {
       occupiedSlots: 3,
       maxSlots: 20
     });
+  });
+
+  it('proves IDLE-005B equipment slot mapping, combat stats calculations and carried weight', () => {
+    // 9 slots bidirectional index mapping
+    expect(Object.keys(EQUIPMENT_SLOT_INDICES)).toHaveLength(9);
+    for (const [slot, idx] of Object.entries(EQUIPMENT_SLOT_INDICES)) {
+      expect(EQUIPMENT_INDEX_TO_SLOT[idx]).toBe(slot);
+    }
+
+    const knight = { vocation: 'knight' as const, level: 1 };
+
+    // 1. Empty equipment baseline equals BASE_KNIGHT_COMBAT_STATS exactly
+    const emptyStats = calculateEffectiveCombatStats(knight, []);
+    expect(emptyStats.weaponAttack).toEqual({ base: 18, bonus: 0, effective: 18 });
+    expect(emptyStats.shieldDefense).toEqual({ base: 16, bonus: 0, effective: 16 });
+    expect(emptyStats.totalArmor).toEqual({ base: 10, bonus: 0, effective: 10 });
+    expect(emptyStats.critChancePermille).toEqual({ base: 50, bonus: 0, effective: 50 });
+    expect(emptyStats.critMultiplierPermille).toEqual({ base: 1250, bonus: 0, effective: 1250 });
+
+    // 2. Rusted blade equipped -> attack 18 + 4 = 22
+    const weaponStats = calculateEffectiveCombatStats(knight, [{ itemId: 'rusted-blade' }]);
+    expect(weaponStats.weaponAttack).toEqual({ base: 18, bonus: 4, effective: 22 });
+    expect(weaponStats.shieldDefense.effective).toBe(16);
+    expect(weaponStats.totalArmor.effective).toBe(10);
+
+    // 3. Silver ring equipped -> critChance 50 + 20 = 70
+    const ringStats = calculateEffectiveCombatStats(knight, [{ itemId: 'silver-ring' }]);
+    expect(ringStats.critChancePermille).toEqual({ base: 50, bonus: 20, effective: 70 });
+
+    // 4. Ritual amulet equipped -> armor 10 + 3 = 13
+    const amuletStats = calculateEffectiveCombatStats(knight, [{ itemId: 'ritual-amulet' }]);
+    expect(amuletStats.totalArmor).toEqual({ base: 10, bonus: 3, effective: 13 });
+
+    // 5. Multiple items equipped (weapon + ring + amulet)
+    const allEquippedStats = calculateEffectiveCombatStats(knight, [
+      { itemId: 'rusted-blade' },
+      { itemId: 'silver-ring' },
+      { itemId: 'ritual-amulet' }
+    ]);
+    expect(allEquippedStats.weaponAttack.effective).toBe(22);
+    expect(allEquippedStats.totalArmor.effective).toBe(13);
+    expect(allEquippedStats.critChancePermille.effective).toBe(70);
+
+    // 6. Stability under different item order
+    const shuffledStats = calculateEffectiveCombatStats(knight, [
+      { itemId: 'ritual-amulet' },
+      { itemId: 'rusted-blade' },
+      { itemId: 'silver-ring' }
+    ]);
+    expect(shuffledStats).toEqual(allEquippedStats);
+
+    // 7. Wrong vocation: rusted-blade requires knight; sorcerer gets no attack bonus
+    const sorcererStats = calculateEffectiveCombatStats({ vocation: 'sorcerer', level: 1 }, [
+      { itemId: 'rusted-blade' }
+    ]);
+    expect(sorcererStats.weaponAttack.bonus).toBe(0);
+
+    // 8. Total carried weight includes backpack + equipped items
+    const backpack = [{ itemId: 'copper-coin', quantity: 50 }]; // 50 * 1 = 50
+    const equipped = [{ itemId: 'rusted-blade' }, { itemId: 'silver-ring' }]; // 250 + 10 = 260
+    const carriedWeight = calculateCharacterCarriedWeight(backpack, equipped);
+    expect(carriedWeight).toBe(310);
+
+    // 9. Capacity calculation with equipped items
+    const cap = calculateInventoryCapacity('knight', 1, backpack, equipped, 20);
+    expect(cap.currentWeight).toBe(310);
+    expect(cap.maxWeight).toBe(5000);
+    expect(cap.remainingCapacity).toBe(4690);
+    expect(cap.occupiedSlots).toBe(1); // Only backpack slots are occupied in backpack count
   });
 });
