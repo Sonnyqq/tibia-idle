@@ -82,7 +82,7 @@ test('completes full Tibia-client responsive PC (1440x900, 1280x800) & mobile (7
   await expect(page.getByTestId('zone-card-damp-catacombs')).toBeVisible();
   await expect(page.getByTestId('zone-card-sunken-crypts')).toBeVisible();
   await expect(page.getByTestId('zone-card-ashwind-ridge')).toBeVisible();
-  await expect(page.getByTestId('start-hunt-damp-catacombs')).toBeDisabled();
+  await expect(page.getByTestId('start-hunt-button')).toBeVisible();
   await assertNoHorizontalOverflow();
   await page.screenshot({
     path: join(SCREENSHOT_DIR, '03-hunts-desktop-1440x900.png'),

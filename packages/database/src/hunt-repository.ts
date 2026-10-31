@@ -1,9 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import { type CharacterDto, type VocationDto } from '@tibia-idle/contracts';
+import {
+  type ActiveHuntDto,
+  type CharacterDto,
+  type CharacterHuntRewardItemDto,
+  type HuntSegmentDto,
+  type HuntSummaryDto,
+  type VocationDto
+} from '@tibia-idle/contracts';
 import {
   assertNoRngLeakInPublicPayload,
   calculateCharacterVitalsForLevel,
+  CATALOG_ITEMS_MAP,
   type Clock,
   type CombatCharacterSnapshot,
   type CombatCheckpointState,
@@ -20,6 +28,7 @@ import {
   type HuntStopReason,
   type HuntStrategy,
   isSupportedSimulationVersion,
+  MAX_OFFLINE_DURATION_MS,
   MAX_POTION_STACK_COUNT,
   MAX_SAFE_ECONOMY_INT,
   type PublicHuntCheckpointView,
@@ -1767,4 +1776,352 @@ export async function reconcileCharacterEconomy(
     expectedLevel,
     isXpLevelReconciled
   };
+}
+
+export function mapActiveHuntDto(
+  huntView: PublicHuntSessionView,
+  nowMs: number,
+  maxOfflineMs: number = MAX_OFFLINE_DURATION_MS
+): ActiveHuntDto {
+  const settledDurationMs = huntView.checkpointView.elapsedMs;
+  const effectiveNowMs = huntView.stopRequestedAtIso
+    ? Math.min(nowMs, Date.parse(huntView.stopRequestedAtIso))
+    : nowMs;
+  const settledUntilMs = Date.parse(huntView.settledUntilIso);
+  const rawUnsettledMs = Math.max(0, effectiveNowMs - settledUntilMs);
+  const remainingCapMs = Math.max(0, maxOfflineMs - settledDurationMs);
+  const unsettledDurationMs =
+    huntView.status === 'COMPLETED' ? 0 : Math.min(rawUnsettledMs, remainingCapMs);
+  const isContinuationRequired =
+    huntView.stopRequestedAtIso !== null &&
+    huntView.status === 'ACTIVE' &&
+    unsettledDurationMs > 0;
+
+  const currentLevel = resolveLevelFromTotalXp(huntView.checkpointView.totalXpGained);
+  const vitals = calculateCharacterVitalsForLevel('knight', currentLevel);
+
+  return {
+    huntId: huntView.huntId,
+    characterId: huntView.characterId,
+    zoneId: huntView.zoneId,
+    strategy: huntView.strategy,
+    status: huntView.status,
+    startedAtIso: huntView.startedAtIso,
+    settledUntilIso: huntView.settledUntilIso,
+    stopRequestedAtIso: huntView.stopRequestedAtIso,
+    completedAtIso: huntView.completedAtIso,
+    serverTimeIso: new Date(nowMs).toISOString(),
+    settledDurationMs,
+    unsettledDurationMs,
+    maxOfflineDurationMs: maxOfflineMs,
+    hp: huntView.checkpointView.currentHp,
+    maxHp: vitals.maxHp,
+    mp: huntView.checkpointView.currentMp,
+    maxMp: vitals.maxMp,
+    reservedHpPotions: huntView.reservedHpPotions,
+    reservedMpPotions: huntView.reservedMpPotions,
+    hpPotionsRemaining: huntView.checkpointView.hpPotionsRemaining,
+    mpPotionsRemaining: huntView.checkpointView.mpPotionsRemaining,
+    hpPotionsUsed: huntView.checkpointView.hpPotionsUsed,
+    mpPotionsUsed: huntView.checkpointView.mpPotionsUsed,
+    totalKills: huntView.checkpointView.totalKills,
+    totalXpGained: huntView.checkpointView.totalXpGained,
+    totalGoldGained: huntView.checkpointView.totalGoldGained,
+    totalLootByItem: huntView.checkpointView.totalLootByItem,
+    stopReason: huntView.stopReason,
+    isContinuationRequired
+  };
+}
+
+export async function getActiveHuntForCharacter(
+  pool: pg.Pool,
+  characterId: string,
+  userId?: string,
+  nowMs: number = Date.now()
+): Promise<{
+  active: boolean;
+  hunt: ActiveHuntDto | null;
+  latestCompletedHuntId: string | null;
+  serverTimeIso: string;
+} | null> {
+  const charRes = await pool.query<{ id: string; user_id: string }>(
+    'SELECT id, user_id FROM characters WHERE id = $1 LIMIT 1',
+    [characterId]
+  );
+  const charRow = charRes.rows[0];
+  if (!charRow) {
+    return null;
+  }
+  if (userId !== undefined && charRow.user_id !== userId) {
+    return null;
+  }
+
+  const activeRes = await pool.query<HuntDbRow>(
+    `SELECT * FROM hunts
+     WHERE character_id = $1 AND status = 'ACTIVE'
+     LIMIT 1`,
+    [characterId]
+  );
+  const activeRow = activeRes.rows[0];
+  if (activeRow) {
+    const cp = parseAndValidateStoredCheckpoint(
+      activeRow.private_checkpoint,
+      activeRow.simulation_version,
+      activeRow.config_digest
+    );
+    const huntView = mapPublicHuntView(activeRow, cp);
+    const activeDto = mapActiveHuntDto(huntView, nowMs);
+    return {
+      active: true,
+      hunt: activeDto,
+      latestCompletedHuntId: null,
+      serverTimeIso: new Date(nowMs).toISOString()
+    };
+  }
+
+  const latestRes = await pool.query<{ id: string }>(
+    `SELECT id FROM hunts
+     WHERE character_id = $1 AND status = 'COMPLETED'
+     ORDER BY completed_at DESC NULLS LAST, started_at DESC
+     LIMIT 1`,
+    [characterId]
+  );
+  const latestCompletedHuntId = latestRes.rows[0]?.id ?? null;
+
+  return {
+    active: false,
+    hunt: null,
+    latestCompletedHuntId,
+    serverTimeIso: new Date(nowMs).toISOString()
+  };
+}
+
+export async function getHuntByIdForUser(
+  pool: pg.Pool,
+  huntId: string,
+  userId?: string
+): Promise<PublicHuntSessionView | null> {
+  const huntRes = await pool.query<HuntDbRow & { owner_user_id: string }>(
+    `SELECT h.*, c.user_id AS owner_user_id
+     FROM hunts h
+     INNER JOIN characters c ON c.id = h.character_id
+     WHERE h.id = $1
+     LIMIT 1`,
+    [huntId]
+  );
+  const huntRow = huntRes.rows[0];
+  if (!huntRow) {
+    return null;
+  }
+  if (userId !== undefined && huntRow.owner_user_id !== userId) {
+    return null;
+  }
+
+  const cp = parseAndValidateStoredCheckpoint(
+    huntRow.private_checkpoint,
+    huntRow.simulation_version,
+    huntRow.config_digest
+  );
+  return mapPublicHuntView(huntRow, cp);
+}
+
+export async function getHuntSegmentsWithSummary(
+  pool: pg.Pool,
+  huntId: string,
+  userId: string | undefined,
+  pagination: { page?: number; limit?: number } = {}
+): Promise<{
+  huntId: string;
+  segments: readonly HuntSegmentDto[];
+  pagination: { page: number; limit: number; totalSegments: number; totalPages: number };
+  summary: HuntSummaryDto;
+} | null> {
+  const huntView = await getHuntByIdForUser(pool, huntId, userId);
+  if (!huntView) {
+    return null;
+  }
+
+  const page = Math.max(1, pagination.page ?? 1);
+  const limit = Math.min(100, Math.max(1, pagination.limit ?? 20));
+  const offset = (page - 1) * limit;
+
+  const countRes = await pool.query<{ count: string }>(
+    'SELECT COUNT(*)::text AS count FROM hunt_segments WHERE hunt_id = $1',
+    [huntId]
+  );
+  const totalSegments = Number(countRes.rows[0]?.count ?? 0);
+  const totalPages = Math.ceil(totalSegments / limit);
+
+  const segmentsRes = await pool.query<HuntSegmentDbRow>(
+    `SELECT * FROM hunt_segments
+     WHERE hunt_id = $1
+     ORDER BY start_checkpoint_version ASC
+     LIMIT $2 OFFSET $3`,
+    [huntId, limit, offset]
+  );
+
+  const segments: HuntSegmentDto[] = segmentsRes.rows.map((row) => ({
+    id: row.id,
+    huntId: row.hunt_id,
+    segmentKey: row.segment_key,
+    startCheckpointVersion: Number(row.start_checkpoint_version),
+    endCheckpointVersion: Number(row.end_checkpoint_version),
+    segmentFromIso: row.segment_from.toISOString(),
+    segmentToIso: row.segment_to.toISOString(),
+    processedDurationMs: Number(row.processed_duration_ms),
+    simulatedEvents: Number(row.simulated_events),
+    stopReason: row.stop_reason,
+    isPartial: Boolean(row.is_partial),
+    rewards: row.rewards,
+    committedAtIso: row.committed_at.toISOString()
+  }));
+
+  // Read all segments' rewards to aggregate summary accurately
+  const allSegmentsRes = await pool.query<{
+    processed_duration_ms: number;
+    rewards: SettlementSegmentRewardsSummary;
+  }>(
+    `SELECT processed_duration_ms, rewards
+     FROM hunt_segments
+     WHERE hunt_id = $1
+     ORDER BY start_checkpoint_version ASC`,
+    [huntId]
+  );
+
+  let totalDurationMs = 0;
+  let totalKills = 0;
+  const totalKillsByMonster: Record<string, number> = {};
+  let totalXpGained = 0;
+  let totalGoldGained = 0;
+  const totalLootByItem: Record<string, number> = {};
+  let totalDamageDealt = 0;
+  let totalDamageTaken = 0;
+  let totalHpPotionsUsed = 0;
+  let totalMpPotionsUsed = 0;
+  let unusedHpPotionsReturned = 0;
+  let unusedMpPotionsReturned = 0;
+  let levelBefore = 1;
+  let levelAfter = 1;
+
+  for (let i = 0; i < allSegmentsRes.rows.length; i += 1) {
+    const row = allSegmentsRes.rows[i];
+    if (!row) continue;
+    totalDurationMs += Number(row.processed_duration_ms);
+    const rew = row.rewards;
+    if (i === 0) {
+      levelBefore = rew.levelBefore;
+    }
+    levelAfter = rew.levelAfter;
+    totalKills += Number(rew.deltaKills ?? 0);
+    totalXpGained += Number(rew.deltaXpGained ?? 0);
+    totalGoldGained += Number(rew.deltaGoldGained ?? 0);
+    totalDamageDealt += Number(rew.deltaDamageDealt ?? 0);
+    totalDamageTaken += Number(rew.deltaDamageTaken ?? 0);
+    totalHpPotionsUsed += Number(rew.deltaHpPotionsUsed ?? 0);
+    totalMpPotionsUsed += Number(rew.deltaMpPotionsUsed ?? 0);
+    unusedHpPotionsReturned += Number(rew.unusedHpPotionsReturned ?? 0);
+    unusedMpPotionsReturned += Number(rew.unusedMpPotionsReturned ?? 0);
+
+    for (const [mId, cnt] of Object.entries(rew.deltaKillsByMonster ?? {})) {
+      totalKillsByMonster[mId] = (totalKillsByMonster[mId] ?? 0) + cnt;
+    }
+    for (const [itemId, qty] of Object.entries(rew.deltaLootByItem ?? {})) {
+      totalLootByItem[itemId] = (totalLootByItem[itemId] ?? 0) + qty;
+    }
+  }
+
+  // If hunt was manually stopped without a terminating combat event, unused potions were returned during stopHunt
+  if (huntView.potionsReturned && unusedHpPotionsReturned === 0 && unusedMpPotionsReturned === 0) {
+    unusedHpPotionsReturned = huntView.checkpointView.hpPotionsRemaining;
+    unusedMpPotionsReturned = huntView.checkpointView.mpPotionsRemaining;
+  }
+
+  const summary: HuntSummaryDto = {
+    zoneId: huntView.zoneId,
+    strategy: huntView.strategy,
+    status: huntView.status,
+    stopReason: huntView.stopReason,
+    startedAtIso: huntView.startedAtIso,
+    completedAtIso: huntView.completedAtIso,
+    totalDurationMs,
+    totalKills,
+    totalKillsByMonster,
+    totalXpGained,
+    totalGoldGained,
+    totalLootByItem,
+    totalDamageDealt,
+    totalDamageTaken,
+    totalHpPotionsUsed,
+    totalMpPotionsUsed,
+    unusedHpPotionsReturned,
+    unusedMpPotionsReturned,
+    levelBefore,
+    levelAfter
+  };
+
+  return {
+    huntId,
+    segments,
+    pagination: {
+      page,
+      limit,
+      totalSegments,
+      totalPages
+    },
+    summary
+  };
+}
+
+export async function getCharacterHuntRewardItems(
+  pool: pg.Pool,
+  characterId: string,
+  userId?: string
+): Promise<readonly CharacterHuntRewardItemDto[]> {
+  const charRes = await pool.query<{ user_id: string }>(
+    'SELECT user_id FROM characters WHERE id = $1 LIMIT 1',
+    [characterId]
+  );
+  const char = charRes.rows[0];
+  if (!char) {
+    return [];
+  }
+  if (userId !== undefined && char.user_id !== userId) {
+    return [];
+  }
+
+  const res = await pool.query<{
+    id: string;
+    hunt_id: string;
+    hunt_segment_id: string;
+    character_id: string;
+    item_id: string;
+    quantity: number;
+    ownership_state: string;
+    claimed_at: Date | null;
+    created_at: Date;
+  }>(
+    `SELECT
+       id, hunt_id, hunt_segment_id, character_id, item_id,
+       quantity, ownership_state, claimed_at, created_at
+     FROM hunt_reward_items
+     WHERE character_id = $1
+     ORDER BY created_at DESC, id ASC`,
+    [characterId]
+  );
+
+  return res.rows.map((row) => {
+    const catalogItem = CATALOG_ITEMS_MAP.get(row.item_id);
+    return {
+      id: row.id,
+      huntId: row.hunt_id,
+      huntSegmentId: row.hunt_segment_id,
+      itemId: row.item_id,
+      nameKey: catalogItem?.nameKey ?? `item.${row.item_id}`,
+      rarity: catalogItem?.rarity ?? 'common',
+      quantity: Number(row.quantity),
+      ownershipState: row.ownership_state as 'UNCLAIMED' | 'CLAIMED',
+      claimedAtIso: row.claimed_at ? row.claimed_at.toISOString() : null,
+      createdAtIso: row.created_at.toISOString()
+    };
+  });
 }

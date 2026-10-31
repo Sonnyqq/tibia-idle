@@ -1,6 +1,7 @@
 import {
   type DangerTierDto,
   type EquipmentSlotDto,
+  type HuntStrategyDto,
   type ItemRarityDto,
   type VocationDto
 } from '@tibia-idle/contracts';
@@ -99,6 +100,28 @@ export const RARITY_KEY_MAP: Readonly<Record<ItemRarityDto, TranslationKey>> = {
   rare: 'rarity.rare'
 };
 
+export const HUNT_STRATEGY_KEY_MAP: Readonly<Record<HuntStrategyDto, TranslationKey>> = {
+  safe: 'hunt.strategySafe',
+  balanced: 'hunt.strategyBalanced',
+  aggressive: 'hunt.strategyAggressive'
+};
+
+export const HUNT_STRATEGY_DESC_MAP: Readonly<Record<HuntStrategyDto, TranslationKey>> = {
+  safe: 'hunt.strategySafeDesc',
+  balanced: 'hunt.strategyBalancedDesc',
+  aggressive: 'hunt.strategyAggressiveDesc'
+};
+
+export const STOP_REASON_KEY_MAP: Readonly<Record<string, TranslationKey>> = {
+  TIME_REACHED: 'hunt.stopReasonTimeReached',
+  EVENT_BUDGET_EXHAUSTED: 'hunt.stopReasonEventBudget',
+  MAX_OFFLINE_CAP_REACHED: 'hunt.stopReasonCapReached',
+  CHARACTER_DIED: 'hunt.stopReasonCharacterDied',
+  OUT_OF_HP_POTIONS_CRITICAL: 'hunt.stopReasonOutOfPotions',
+  MANUAL_STOP: 'hunt.stopReasonManualStop',
+  ALREADY_TERMINATED: 'hunt.stopReasonAlreadyTerminated'
+};
+
 const KNOWN_ERROR_KEYS: ReadonlySet<string> = new Set<TranslationKey>([
   'common.error',
   'auth.invalidCredentials',
@@ -111,7 +134,14 @@ const KNOWN_ERROR_KEYS: ReadonlySet<string> = new Set<TranslationKey>([
   'character.nameTaken',
   'character.nameReserved',
   'character.nameInvalid',
-  'character.notFound'
+  'character.notFound',
+  'hunt.activeAlreadyExists',
+  'hunt.knightOnlyVocation',
+  'hunt.levelTooLow',
+  'hunt.unknownZone',
+  'hunt.insufficientPotions',
+  'hunt.notFound',
+  'hunt.rateLimited'
 ]);
 
 export function resolveErrorMessageKey(rawKey: unknown): TranslationKey {
@@ -124,6 +154,17 @@ export function resolveErrorMessageKey(rawKey: unknown): TranslationKey {
 export function formatStatNumber(value: number, locale: SupportedLocale): string {
   const intlLocale = locale === 'pl' ? 'pl-PL' : 'en-US';
   return new Intl.NumberFormat(intlLocale).format(value);
+}
+
+export function formatDuration(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes.toString().padStart(2, '0')}m ${seconds.toString().padStart(2, '0')}s`;
+  }
+  return `${minutes}m ${seconds.toString().padStart(2, '0')}s`;
 }
 
 export function computeXpBarProgress(

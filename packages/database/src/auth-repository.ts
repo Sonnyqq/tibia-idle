@@ -51,6 +51,8 @@ interface CharacterRow {
   skill_distance: number;
   skill_magic: number;
   skill_shielding: number;
+  hp_potions?: number | undefined;
+  mp_potions?: number | undefined;
   created_at: Date;
 }
 
@@ -83,6 +85,8 @@ function mapCharacterDto(row: CharacterRow): CharacterDto {
       magic: Number(row.skill_magic),
       shielding: Number(row.skill_shielding)
     },
+    hpPotions: Number(row.hp_potions ?? 250),
+    mpPotions: Number(row.mp_potions ?? 150),
     createdAt: row.created_at.toISOString()
   };
 }
@@ -254,7 +258,8 @@ export async function listCharactersForUser(
     `SELECT
        id, user_id, slot_number, name, vocation, level, xp,
        hp, max_hp, mp, max_mp, gold,
-       skill_melee, skill_distance, skill_magic, skill_shielding, created_at
+       skill_melee, skill_distance, skill_magic, skill_shielding,
+       hp_potions, mp_potions, created_at
      FROM characters
      WHERE user_id = $1
      ORDER BY slot_number ASC`,
@@ -272,7 +277,8 @@ export async function findCharacterByIdForUser(
     `SELECT
        id, user_id, slot_number, name, vocation, level, xp,
        hp, max_hp, mp, max_mp, gold,
-       skill_melee, skill_distance, skill_magic, skill_shielding, created_at
+       skill_melee, skill_distance, skill_magic, skill_shielding,
+       hp_potions, mp_potions, created_at
      FROM characters
      WHERE id = $1 AND user_id = $2
      LIMIT 1`,
@@ -357,7 +363,8 @@ export async function createCharacterTransactional(
        RETURNING
          id, user_id, slot_number, name, vocation, level, xp,
          hp, max_hp, mp, max_mp, gold,
-         skill_melee, skill_distance, skill_magic, skill_shielding, created_at`,
+         skill_melee, skill_distance, skill_magic, skill_shielding,
+         hp_potions, mp_potions, created_at`,
       [
         characterId,
         params.userId,

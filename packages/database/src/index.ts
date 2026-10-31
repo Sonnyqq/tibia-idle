@@ -21,7 +21,12 @@ export {
 } from './auth-repository.js';
 export {
   type ExtendedCharacterDto,
+  getActiveHuntForCharacter,
+  getCharacterHuntRewardItems,
+  getHuntByIdForUser,
+  getHuntSegmentsWithSummary,
   type HuntStatus,
+  mapActiveHuntDto,
   type PersistedHuntStopReason,
   type PublicHuntSessionView,
   reconcileCharacterEconomy,

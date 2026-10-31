@@ -1,7 +1,16 @@
 import {
+  type ActiveHuntDto,
+  type ActiveHuntResponseDto,
   type CharacterDto,
+  type CharacterHuntRewardItemDto,
+  type CharacterHuntRewardsResponseDto,
   EQUIPMENT_SLOTS,
+  type HuntSegmentsResponseDto,
+  type HuntStrategyDto,
   type SessionMeResponseDto,
+  type SettleHuntResponseDto,
+  type StartHuntResponseDto,
+  type StopHuntResponseDto,
   type UserDto,
   VOCATIONS,
   type VocationDto,
@@ -100,6 +109,17 @@ function clearSessionUiState(): void {
   }
 }
 
+function generateClientUUID(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 const MINI_BACKPACK_SLOTS = [1, 2, 3, 4, 5, 6, 7, 8] as const;
 
 export interface AppProps {
@@ -143,6 +163,13 @@ export function App({
 
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorKey, setErrorKey] = useState<TranslationKey | null>(null);
+
+  const [activeHunt, setActiveHunt] = useState<ActiveHuntDto | null>(null);
+  const [activeHuntLoading, setActiveHuntLoading] = useState<boolean>(false);
+  const [huntActionLoading, setHuntActionLoading] = useState<boolean>(false);
+  const [huntReport, setHuntReport] = useState<HuntSegmentsResponseDto | null>(null);
+  const [rewardItems, setRewardItems] = useState<readonly CharacterHuntRewardItemDto[]>([]);
+  const [dynamicLogEntries, setDynamicLogEntries] = useState<GameLogEntry[]>([]);
 
   const activeCharacter = characters.find((c) => c.id === selectedCharacterId) ?? null;
 
@@ -356,7 +383,252 @@ export function App({
       setSelectedCharacterId(null);
       setActiveTab('dashboard');
       setZones([]);
+      setActiveHunt(null);
+      setRewardItems([]);
+      setHuntReport(null);
       setIsLoading(false);
+    }
+  };
+
+  const fetchActiveHunt = useCallback(
+    async (charId: string) => {
+      setActiveHuntLoading(true);
+      try {
+        const res = await fetch(`${apiBaseUrl}/hunts/active?characterId=${charId}`, {
+          method: 'GET',
+          credentials: 'include'
+        });
+        if (res.ok) {
+          const data = (await res.json()) as ActiveHuntResponseDto;
+          setActiveHunt(data.hunt);
+          return data;
+        }
+      } catch {
+        // Network or offline
+      } finally {
+        setActiveHuntLoading(false);
+      }
+      return null;
+    },
+    [apiBaseUrl]
+  );
+
+  const fetchRewardItems = useCallback(
+    async (charId: string) => {
+      try {
+        const res = await fetch(`${apiBaseUrl}/characters/${charId}/hunt-rewards`, {
+          method: 'GET',
+          credentials: 'include'
+        });
+        if (res.ok) {
+          const data = (await res.json()) as CharacterHuntRewardsResponseDto;
+          setRewardItems(data.items);
+        }
+      } catch {
+        // Network error
+      }
+    },
+    [apiBaseUrl]
+  );
+
+  useEffect(() => {
+    if (!activeCharacter) {
+      setActiveHunt(null);
+      setRewardItems([]);
+      return;
+    }
+    void fetchActiveHunt(activeCharacter.id);
+    void fetchRewardItems(activeCharacter.id);
+  }, [activeCharacter?.id, fetchActiveHunt, fetchRewardItems]);
+
+  useEffect(() => {
+    if (!activeCharacter) return;
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        void fetchActiveHunt(activeCharacter.id);
+      }
+    }, 10_000);
+    return () => clearInterval(interval);
+  }, [activeCharacter?.id, fetchActiveHunt]);
+
+  const handleStartHunt = async (params: {
+    zoneId: string;
+    strategy: HuntStrategyDto;
+    hpPotions: number;
+    mpPotions: number;
+  }) => {
+    if (!activeCharacter || !csrfToken) return;
+    setHuntActionLoading(true);
+    setErrorKey(null);
+    try {
+      const res = await fetch(`${apiBaseUrl}/hunts/start`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken
+        },
+        body: JSON.stringify({
+          characterId: activeCharacter.id,
+          zoneId: params.zoneId,
+          strategy: params.strategy,
+          hpPotions: params.hpPotions,
+          mpPotions: params.mpPotions,
+          idempotencyKey: generateClientUUID()
+        })
+      });
+
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as {
+          error?: { messageKey?: string };
+        } | null;
+        setErrorKey(resolveErrorMessageKey(errBody?.error?.messageKey));
+        return;
+      }
+
+      const data = (await res.json()) as StartHuntResponseDto;
+      setCharacters((prev) =>
+        prev.map((c) => (c.id === data.character.id ? data.character : c))
+      );
+      await fetchActiveHunt(activeCharacter.id);
+      await fetchRewardItems(activeCharacter.id);
+
+      const nowTime = new Date().toLocaleTimeString(locale === 'pl' ? 'pl-PL' : 'en-US', {
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+      setDynamicLogEntries((prev) => [
+        ...prev,
+        {
+          id: `hunt-start-${Date.now()}`,
+          time: nowTime,
+          channel: 'hunt',
+          tone: 'info',
+          text: t(locale, 'hunt.logStarted')
+        }
+      ]);
+    } catch {
+      setErrorKey('common.error');
+    } finally {
+      setHuntActionLoading(false);
+    }
+  };
+
+  const handleSettleHunt = async () => {
+    if (!activeHunt || !csrfToken || !activeCharacter) return;
+    setHuntActionLoading(true);
+    setErrorKey(null);
+    try {
+      const res = await fetch(`${apiBaseUrl}/hunts/${activeHunt.huntId}/settle`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken
+        },
+        body: JSON.stringify({
+          idempotencyKey: generateClientUUID()
+        })
+      });
+
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as {
+          error?: { messageKey?: string };
+        } | null;
+        setErrorKey(resolveErrorMessageKey(errBody?.error?.messageKey));
+        return;
+      }
+
+      const data = (await res.json()) as SettleHuntResponseDto;
+      setCharacters((prev) =>
+        prev.map((c) => (c.id === data.character.id ? data.character : c))
+      );
+      await fetchActiveHunt(activeCharacter.id);
+      await fetchRewardItems(activeCharacter.id);
+
+      const nowTime = new Date().toLocaleTimeString(locale === 'pl' ? 'pl-PL' : 'en-US', {
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+      setDynamicLogEntries((prev) => [
+        ...prev,
+        {
+          id: `hunt-settle-${Date.now()}`,
+          time: nowTime,
+          channel: 'hunt',
+          tone: 'info',
+          text: `${t(locale, 'hunt.logSettled')} (+${data.rewards.deltaXpGained} XP, +${data.rewards.deltaGoldGained} G, ${data.rewards.deltaKills} kills)`
+        }
+      ]);
+    } catch {
+      setErrorKey('common.error');
+    } finally {
+      setHuntActionLoading(false);
+    }
+  };
+
+  const handleStopHunt = async () => {
+    if (!activeHunt || !csrfToken || !activeCharacter) return;
+    setHuntActionLoading(true);
+    setErrorKey(null);
+    try {
+      const huntId = activeHunt.huntId;
+      const res = await fetch(`${apiBaseUrl}/hunts/${huntId}/stop`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken
+        },
+        body: JSON.stringify({
+          idempotencyKey: generateClientUUID()
+        })
+      });
+
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as {
+          error?: { messageKey?: string };
+        } | null;
+        setErrorKey(resolveErrorMessageKey(errBody?.error?.messageKey));
+        return;
+      }
+
+      const data = (await res.json()) as StopHuntResponseDto;
+      setCharacters((prev) =>
+        prev.map((c) => (c.id === data.character.id ? data.character : c))
+      );
+      setActiveHunt(null);
+
+      // Fetch summary segments for report window
+      const repRes = await fetch(`${apiBaseUrl}/hunts/${huntId}/segments`, {
+        method: 'GET',
+        credentials: 'include'
+      });
+      if (repRes.ok) {
+        const repData = (await repRes.json()) as HuntSegmentsResponseDto;
+        setHuntReport(repData);
+      }
+
+      await fetchRewardItems(activeCharacter.id);
+
+      const nowTime = new Date().toLocaleTimeString(locale === 'pl' ? 'pl-PL' : 'en-US', {
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+      setDynamicLogEntries((prev) => [
+        ...prev,
+        {
+          id: `hunt-stop-${Date.now()}`,
+          time: nowTime,
+          channel: 'hunt',
+          tone: 'info',
+          text: t(locale, 'hunt.logCompleted')
+        }
+      ]);
+    } catch {
+      setErrorKey('common.error');
+    } finally {
+      setHuntActionLoading(false);
     }
   };
 
@@ -386,8 +658,8 @@ export function App({
         text: `${t(locale, 'log.systemCharacterReady')} [${activeCharacter.name} — ${t(locale, 'stats.level')} ${activeCharacter.stats.level}]`
       });
     }
-    return list;
-  }, [activeCharacter, locale]);
+    return [...list, ...dynamicLogEntries.slice(-30)];
+  }, [activeCharacter, dynamicLogEntries, locale]);
 
   const xpProgress = activeCharacter
     ? computeXpBarProgress(activeCharacter.stats.level, activeCharacter.stats.xp)
@@ -766,6 +1038,19 @@ export function App({
                   isLoading={zonesLoading}
                   errorKey={zonesErrorKey}
                   onRetry={() => void loadZonesCatalog()}
+                  activeCharacter={activeCharacter}
+                  activeHunt={activeHunt}
+                  activeHuntLoading={activeHuntLoading}
+                  onStartHunt={handleStartHunt}
+                  onSettleHunt={handleSettleHunt}
+                  onStopHunt={handleStopHunt}
+                  huntActionLoading={huntActionLoading}
+                  huntReport={huntReport}
+                  onCloseHuntReport={() => setHuntReport(null)}
+                  rewardItems={rewardItems}
+                  onRefreshRewardItems={() =>
+                    activeCharacter ? fetchRewardItems(activeCharacter.id) : Promise.resolve()
+                  }
                 />
               ) : activeTab === 'character' ? (
                 <CharacterView locale={locale} character={activeCharacter} />
@@ -783,6 +1068,7 @@ export function App({
                 <DashboardView
                   locale={locale}
                   character={activeCharacter}
+                  activeHunt={activeHunt}
                   onNavigateTab={navigateTab}
                   onSwitchCharacter={() => selectCharacter(null)}
                 />

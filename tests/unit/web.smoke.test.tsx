@@ -49,6 +49,8 @@ const sampleChar: CharacterDto = {
     magic: 1,
     shielding: 15
   },
+  hpPotions: 250,
+  mpPotions: 150,
   createdAt: '2026-10-30T20:00:00.000Z'
 };
 
@@ -200,8 +202,8 @@ describe('@tibia-idle/web unit tests (Tibia client components, navigation, asset
     expect(huntsEn).toContain('Damp Catacombs');
     expect(huntsEn).toContain('Sunken Crypts');
     expect(huntsEn).toContain('Ashwind Ridge');
-    expect(huntsEn).toContain('Pending P02 simulation');
-    expect(huntsEn).toContain('Hunt execution unlocks in IDLE-004');
+    expect(huntsEn).toContain('Start hunt');
+    expect(huntsEn).toContain('AFK Reward Inbox');
 
     const huntsEmptyEn = renderToStaticMarkup(
       <App
