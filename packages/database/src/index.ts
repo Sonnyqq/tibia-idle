@@ -19,6 +19,27 @@ export {
   type StoredUserRecord,
   updateUserLocale
 } from './auth-repository.js';
+export {
+  type ExtendedCharacterDto,
+  type HuntStatus,
+  type PersistedHuntStopReason,
+  type PublicHuntSessionView,
+  reconcileCharacterEconomy,
+  type ReconcileCharacterEconomyReport,
+  type SettleHuntInput,
+  type SettleHuntResult,
+  settleHunt,
+  type SettlementFaultInjectionHook,
+  type SettlementFaultStage,
+  type SettlementSegmentRewardsSummary,
+  type SettlementTelemetry,
+  type StartHuntInput,
+  type StartHuntResult,
+  startHunt,
+  type StopHuntInput,
+  type StopHuntResult,
+  stopHunt
+} from './hunt-repository.js';
 
 export interface DatabaseConfig {
   connectionString: string;

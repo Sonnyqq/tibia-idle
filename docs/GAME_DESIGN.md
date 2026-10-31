@@ -24,12 +24,12 @@ Text/UI-first idle MMORPG aimed at the classic Tibia community worldwide: **PL a
 - Simple tasks and 3 solo bosses; marketplace with fixed-price offers and ledger-backed purchases; chat and leaderboards.
 
 ## Hunt flow
-1. Server validates character ownership, equipment, resources, active session, and zone availability.
-2. Snapshot hunt configuration, progression/equipment and **simulation version**; start immutable run and checkpoint.
-3. On `settle`: lock character/session, advance from `settled_until` to min(serverNow, stop window), apply time/kill/resource rules and deterministic seeded RNG, record kill event aggregates and transfers.
-4. Persist net XP/gold/items/resources/bestiary deltas and checkpoint in **one transaction**, with unique settlement id.
-5. Return structured summary and update UI. Refresh/retry must not duplicate rewards.
-6. Buff/potion expiry, deaths, full inventory, end of maximum offline time terminate a segment deterministically.
+1. Server validates character ownership, equipment, resources, active session, and zone availability (`startHunt` in `packages/database/src/hunt-repository.ts`).
+2. Snapshot hunt configuration, progression/equipment and **simulation version**; reserve real character potions (`hp_potions`, `mp_potions`), generate a server CSPRNG seed, and start an immutable run and checkpoint. One-time starter supplies (`250` HP / `150` MP potions) are granted once per character and never replenished for free on hunt restart.
+3. On `settle` (`settleHunt`): read checkpoint, run deterministic simulation outside DB locks, then open a short transaction locking `characters` and `hunts` (`FOR UPDATE`), verify `row_version` and `(hunt_id, segment_key)` / `(hunt_id, start_checkpoint_version)` uniqueness, advance `settled_until` strictly by `deltaElapsedMs` (supporting partial settlement on `EVENT_BUDGET_EXHAUSTED` without losing remaining time), and persist XP/level, `currency_ledger`, `hunt_reward_items`, and the new checkpoint in **one transaction**.
+4. Level-up rule: XP and character level update transactionally on settlement (`resolveLevelFromTotalXp`), while the active hunt's combat snapshot remains frozen until the next hunt starts so replay stays 100% deterministic.
+5. Death & camp revival rule: if a character dies in combat (`CHARACTER_DIED`), the combat checkpoint records `currentHp = 0` and ends the hunt, while the character row revives at camp with full `max_hp`/`max_mp` (preserving `characters.hp > 0`) and returns any unused reserved potions once.
+6. Refresh/retry, concurrent settlements, or pre/post-COMMIT crashes never duplicate rewards or potions.
 
 ## Balance model
 Show estimates as ranges until sufficient events. Use controlled data and review balance tables separately from code. Specify per-zone expected XP/hour, net gold/hour after potions, deaths/24h, resource drain and loot distribution. Avoid tuning production mid-running session silently: change config/version with explicit cutover.

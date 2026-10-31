@@ -257,6 +257,39 @@ export const INITIAL_ZONES_CATALOG: readonly ZoneCatalogDto[] = [
   }
 ];
 
+export const MAX_SAFE_ECONOMY_INT = Number.MAX_SAFE_INTEGER; // 9_007_199_254_740_991
+
+export const VALID_CATALOG_ITEM_IDS: ReadonlySet<string> = new Set(
+  INITIAL_ZONES_CATALOG.flatMap((zone) =>
+    zone.creatures.flatMap((creature) => creature.lootPreview.map((item) => item.id))
+  )
+);
+
+export const VITALS_PER_LEVEL_CONFIG: Readonly<
+  Record<VocationDto, { readonly hpPerLevel: number; readonly mpPerLevel: number }>
+> = {
+  knight: { hpPerLevel: 15, mpPerLevel: 5 },
+  paladin: { hpPerLevel: 10, mpPerLevel: 15 },
+  sorcerer: { hpPerLevel: 5, mpPerLevel: 30 },
+  druid: { hpPerLevel: 5, mpPerLevel: 30 }
+} as const;
+
+export function calculateCharacterVitalsForLevel(
+  vocation: VocationDto,
+  level: number
+): { readonly maxHp: number; readonly maxMp: number } {
+  if (!Number.isSafeInteger(level) || level < 1 || level > 10_000) {
+    throw new RangeError(`Invalid character level '${level}' for vitals calculation`);
+  }
+  const base = VOCATION_STARTING_CONFIG[vocation];
+  const growth = VITALS_PER_LEVEL_CONFIG[vocation];
+  const extraLevels = level - 1;
+  return {
+    maxHp: base.hp + extraLevels * growth.hpPerLevel,
+    maxMp: base.mp + extraLevels * growth.mpPerLevel
+  };
+}
+
 export interface LevelXpProgress {
   readonly level: number;
   readonly currentXp: number;
@@ -271,6 +304,27 @@ export function calculateTotalXpForLevel(level: number): number {
   }
   const n = level - 1;
   return Math.floor((50 * n * (n * n + 5)) / 3);
+}
+
+/**
+ * Deterministically resolves character level from cumulative total XP.
+ * Uses binary search over [1, 10_000]; rejects negative, non-integer, or overflowing XP.
+ */
+export function resolveLevelFromTotalXp(totalXp: number): number {
+  if (!Number.isSafeInteger(totalXp) || totalXp < 0 || totalXp > MAX_SAFE_ECONOMY_INT) {
+    throw new RangeError('totalXp must be a non-negative safe integer');
+  }
+  let low = 1;
+  let high = 10_000;
+  while (low < high) {
+    const mid = Math.floor((low + high + 1) / 2);
+    if (calculateTotalXpForLevel(mid) <= totalXp) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return low;
 }
 
 export function calculateLevelXpProgress(level: number, currentXp: number): LevelXpProgress {

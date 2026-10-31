@@ -510,20 +510,38 @@ export function computeDeterministicDigest(canonicalPayload: string): string {
   return `v1:${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
 }
 
+function canonicalizeJsonValue(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeJsonValue);
+  }
+  const record = value as Record<string, unknown>;
+  const sortedKeys = Object.keys(record).sort();
+  const normalized: Record<string, unknown> = {};
+  for (const key of sortedKeys) {
+    normalized[key] = canonicalizeJsonValue(record[key]);
+  }
+  return normalized;
+}
+
 export function computeHuntSnapshotDigest(
   snapshot: Omit<HuntConfigurationSnapshot, 'configDigest'>
 ): string {
-  const canonical = JSON.stringify({
-    simulationVersion: snapshot.simulationVersion,
-    zoneId: snapshot.zoneId,
-    strategy: snapshot.strategy,
-    timings: snapshot.timings,
-    strategyProfile: snapshot.strategyProfile,
-    zone: snapshot.zone,
-    monsters: snapshot.monsters,
-    character: snapshot.character,
-    resources: snapshot.resources
-  });
+  const canonical = JSON.stringify(
+    canonicalizeJsonValue({
+      simulationVersion: snapshot.simulationVersion,
+      zoneId: snapshot.zoneId,
+      strategy: snapshot.strategy,
+      timings: snapshot.timings,
+      strategyProfile: snapshot.strategyProfile,
+      zone: snapshot.zone,
+      monsters: snapshot.monsters,
+      character: snapshot.character,
+      resources: snapshot.resources
+    })
+  );
   return computeDeterministicDigest(canonical);
 }
 

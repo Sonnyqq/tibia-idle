@@ -18,12 +18,12 @@ All stages start **NOT STARTED**; a roadmap line is not evidence of code. No mer
 **Exit:** one user can register, change language and create a character; real CI regression.
 
 ## P02 — first vertical slice of idle hunts (HIGHEST RISK)
-- [x] Domain: versioned deterministic combat, RNG, clock, resources, XP and loot (`IDLE-004A`, `packages/domain/src/combat/`).
-- [ ] 1 class, 3 zones, 6 monsters, 12 items; display estimates and settled outcomes (`IDLE-004A` domain ready; API/UI in `IDLE-004B`).
-- [ ] One active hunt; offline checkpoint and idempotent claim; stop/death/potions/24h cap (`IDLE-004B`).
-- [ ] DB atomicity, double-settlement, concurrent workers, restart/SIGTERM crash tests (`IDLE-004B`).
-- [ ] Browser E2E: start -> close -> return -> see loot; mobile and network loss (`IDLE-004B`).
-- [ ] Establish baseline for 100/1000 ongoing hunts and concurrent settlements (domain baseline measured in `IDLE-004A`; DB concurrency in `IDLE-004B`).
+- [x] Domain: versioned deterministic combat, RNG, clock, resources, XP and loot (`IDLE-004A`, `packages/domain/src/combat/`, merged in PR #4).
+- [ ] 1 class, 3 zones, 6 monsters, 12 items; display estimates and settled outcomes (`IDLE-004A` domain + `IDLE-004B-1` DB persistence ready; API/UI in `IDLE-004B-2`).
+- [x] One active hunt; offline checkpoint and idempotent claim; stop/death/potions/24h cap (`IDLE-004B-1`, `packages/database/src/hunt-repository.ts`).
+- [x] DB atomicity, double-settlement, concurrent workers, restart/SIGTERM crash tests (`IDLE-004B-1`, `tests/integration/hunts.integration.test.ts`).
+- [ ] Browser E2E: start -> close -> return -> see loot; mobile and network loss (`IDLE-004B-2`).
+- [x] Establish baseline for 100/1000 ongoing hunts and concurrent settlements (domain baseline in `IDLE-004A`; PostgreSQL 100/1000 & race baseline in `IDLE-004B-1` `tests/integration/hunts.perf.integration.test.ts`).
 **Exit:** 0 double rewards in race suite, replay deterministic, full CI passing.
 
 ## P03 — combat and class progression
