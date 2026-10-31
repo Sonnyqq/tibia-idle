@@ -13,7 +13,7 @@ export default defineConfig({
     }
   },
   test: {
-    include: ['tests/unit/**/*.test.{ts,tsx}'],
+    include: ['tests/unit/**/*.test.{ts,tsx}', 'tests/perf/**/*.test.ts'],
     environment: 'node',
     passWithNoTests: false
   }

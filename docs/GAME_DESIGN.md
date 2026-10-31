@@ -34,6 +34,16 @@ Text/UI-first idle MMORPG aimed at the classic Tibia community worldwide: **PL a
 ## Balance model
 Show estimates as ranges until sufficient events. Use controlled data and review balance tables separately from code. Specify per-zone expected XP/hour, net gold/hour after potions, deaths/24h, resource drain and loot distribution. Avoid tuning production mid-running session silently: change config/version with explicit cutover.
 
+## Deterministic combat & replay engine (`IDLE-004A`)
+- **Location:** `packages/domain/src/combat/` (`COMBAT_SIMULATION_VERSION = '1.0.0'`). Pure TypeScript domain functions with zero DB, HTTP, or `Math.random()` / `Date.now()` usage.
+- **Stateful PRNG:** 32-bit Mulberry32 (`createStatefulRng`) storing `{ seed, state, cursor }`. Given identical `(version, config, characterSnapshot, checkpointState, durationMs)`, output is 100% bit-exact across platforms.
+- **Discrete-event simulation & chunk equivalence:** `simulateHuntSegment` advances exact millisecond timers (`nextPassiveRegenInMs`, `activeEncounter.nextPlayerAttackInMs`, `activeEncounter.nextMonsterAttackInMs`, or `respawnCooldownRemainingMs`). Splitting a window at any boundary (`60m == 30m + 30m == irregular ms chunks`) preserves mid-encounter monster HP, attack timers, and RNG state without restarting fights or double-rolling loot.
+- **Combat & strategy model (Knight vertical slice):**
+  - Knight damage scales with `melee`, `weaponAttack`, `level`, strategy `attackFactorPermille`, optional `Brutal Strike` mana ability, and critical hit roll, mitigated by monster `defense` and `armor`.
+  - Monster damage scales with `attack` and `armorPenetrationPermille`, mitigated by Knight `shielding * shieldDefense` (scaled by strategy `defenseFactorPermille`) and `totalArmor`.
+  - Strategies (`safe`, `balanced`, `aggressive`) govern attack/defense stance, auto-potion thresholds, mana strike usage, and critical retreat when out of HP potions. No artificial XP or drop rate multipliers exist.
+  - Per-kill loot (`rollMonsterKillLoot`) rolls gold `[goldMin, goldMax]` and per-item `chancePermille` strictly once upon confirmed monster death (`newMonsterHp <= 0`).
+
 ## Localization
 Use keys, pluralization, locale-aware numbers and dates; avoid embedding English or Polish text in logic. Players can change locale anytime; account/global content IDs remain language-neutral. Initial locales `pl-PL`, `en-US`.
 
