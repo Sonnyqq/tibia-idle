@@ -680,4 +680,391 @@ describe('IDLE-005A — Persistent Inventory, Backpack, Capacity & AFK Loot Clai
       expect(retryRes.inventory.slots[0]?.quantity).toBe(5);
     }
   });
+
+  it('P0: rejects idempotency payload conflict on claim, move, and split with HTTP 409', async () => {
+    const { character, sessionCookie, csrfToken } = await createTestAccountAndCharacter('IdempConflict');
+    const clock = createFixedClock(1_700_000_000_000);
+    const server = await buildApiServer({ dbPool: pool, clock });
+    await server.ready();
+
+    const huntId = randomUUID();
+    const segId = randomUUID();
+    await pool.query(
+      `INSERT INTO hunts (id, character_id, start_idempotency_key, zone_id, strategy, status, started_at, settled_until, completed_at, simulation_version, config_digest, private_checkpoint, reserved_hp_potions, reserved_mp_potions, potions_returned, row_version)
+       VALUES ($1, $2, $3, 'damp-catacombs', 'balanced', 'COMPLETED', NOW() - INTERVAL '1 hour', NOW(), NOW(), '1.0.0', 'hash', '{"simulatedEvents":10}'::jsonb, 0, 0, true, 1)`,
+      [huntId, character.id, randomUUID()]
+    );
+    await pool.query(
+      `INSERT INTO hunt_segments (id, hunt_id, segment_key, start_checkpoint_version, end_checkpoint_version, segment_from, segment_to, processed_duration_ms, simulated_events, stop_reason, is_partial, rewards, committed_at)
+       VALUES ($1, $2, $3, 1, 2, NOW() - INTERVAL '1 hour', NOW(), 3600000, 10, 'TIME_REACHED', false, '{"deltaXpGained":100,"deltaGoldGained":50,"deltaLootByItem":{"copper-coin":20,"rusted-blade":1}}'::jsonb, NOW())`,
+      [segId, huntId, randomUUID()]
+    );
+
+    const rewardA = randomUUID();
+    const rewardB = randomUUID();
+    await pool.query(
+      `INSERT INTO hunt_reward_items (id, hunt_id, hunt_segment_id, character_id, item_id, quantity, ownership_state)
+       VALUES
+         ($1, $2, $3, $4, 'copper-coin', 20, 'UNCLAIMED'),
+         ($5, $2, $3, $4, 'rusted-blade', 1, 'UNCLAIMED')`,
+      [rewardA, huntId, segId, character.id, rewardB]
+    );
+
+    // 1. Claim reward A with key K1 via API -> SUCCESS (200)
+    const claimARes = await server.inject({
+      method: 'POST',
+      url: `/characters/${character.id}/hunt-rewards/${rewardA}/claim`,
+      headers: { cookie: sessionCookie, 'x-csrf-token': csrfToken },
+      payload: { idempotencyKey: 'shared-claim-key' }
+    });
+    expect(claimARes.statusCode).toBe(200);
+    const claimABody = claimARes.json() as { idempotentReplay: boolean };
+    expect(claimABody.idempotentReplay).toBe(false);
+
+    // 2. Claim reward B with the SAME key K1 via API -> 409 IDEMPOTENCY_KEY_CONFLICT
+    const claimBConflictRes = await server.inject({
+      method: 'POST',
+      url: `/characters/${character.id}/hunt-rewards/${rewardB}/claim`,
+      headers: { cookie: sessionCookie, 'x-csrf-token': csrfToken },
+      payload: { idempotencyKey: 'shared-claim-key' }
+    });
+    expect(claimBConflictRes.statusCode).toBe(409);
+    const conflictBody = claimBConflictRes.json() as { error: { code: string; messageKey: string } };
+    expect(conflictBody.error.code).toBe('IDEMPOTENCY_KEY_CONFLICT');
+    expect(conflictBody.error.messageKey).toBe('error.idempotencyConflict');
+
+    // Reward B must remain UNCLAIMED and zero duplicates
+    const checkB = await pool.query<{ ownership_state: string }>(
+      'SELECT ownership_state FROM hunt_reward_items WHERE id = $1',
+      [rewardB]
+    );
+    expect(checkB.rows[0]?.ownership_state).toBe('UNCLAIMED');
+
+    // Direct repository call returns IDEMPOTENCY_KEY_CONFLICT
+    const directConflict = await claimHuntReward(pool, {
+      characterId: character.id,
+      rewardId: rewardB,
+      idempotencyKey: 'shared-claim-key'
+    });
+    expect(directConflict.status).toBe('IDEMPOTENCY_KEY_CONFLICT');
+
+    // Replay on reward A with same key K1 -> 200 SUCCESS idempotentReplay
+    const replayARes = await server.inject({
+      method: 'POST',
+      url: `/characters/${character.id}/hunt-rewards/${rewardA}/claim`,
+      headers: { cookie: sessionCookie, 'x-csrf-token': csrfToken },
+      payload: { idempotencyKey: 'shared-claim-key' }
+    });
+    expect(replayARes.statusCode).toBe(200);
+    const replayABody = replayARes.json() as { idempotentReplay: boolean };
+    expect(replayABody.idempotentReplay).toBe(true);
+
+    // 3. Move idempotency conflict test:
+    // Move slot 0 to slot 3 with key M1
+    const moveRes1 = await server.inject({
+      method: 'POST',
+      url: `/characters/${character.id}/inventory/move`,
+      headers: { cookie: sessionCookie, 'x-csrf-token': csrfToken },
+      payload: { fromSlot: 0, toSlot: 3, idempotencyKey: 'shared-move-key' }
+    });
+    expect(moveRes1.statusCode).toBe(200);
+    const moveBody1 = moveRes1.json() as { action: string; idempotentReplay: boolean };
+    expect(moveBody1.action).toBe('MOVED');
+    expect(moveBody1.idempotentReplay).toBe(false);
+
+    // Move slot 3 to slot 5 with the SAME key M1 -> 409 IDEMPOTENCY_KEY_CONFLICT
+    const moveConflictRes = await server.inject({
+      method: 'POST',
+      url: `/characters/${character.id}/inventory/move`,
+      headers: { cookie: sessionCookie, 'x-csrf-token': csrfToken },
+      payload: { fromSlot: 3, toSlot: 5, idempotencyKey: 'shared-move-key' }
+    });
+    expect(moveConflictRes.statusCode).toBe(409);
+
+    // Replay original move 0 to 3 with key M1 -> 200 SUCCESS preserving action MOVED
+    const replayMoveRes = await server.inject({
+      method: 'POST',
+      url: `/characters/${character.id}/inventory/move`,
+      headers: { cookie: sessionCookie, 'x-csrf-token': csrfToken },
+      payload: { fromSlot: 0, toSlot: 3, idempotencyKey: 'shared-move-key' }
+    });
+    expect(replayMoveRes.statusCode).toBe(200);
+    const replayMoveBody = replayMoveRes.json() as { action: string; idempotentReplay: boolean };
+    expect(replayMoveBody.action).toBe('MOVED');
+    expect(replayMoveBody.idempotentReplay).toBe(true);
+
+    // 4. Split idempotency conflict test:
+    // Split slot 3 to slot 4 with quantity 5 and key S1
+    const splitRes1 = await server.inject({
+      method: 'POST',
+      url: `/characters/${character.id}/inventory/split`,
+      headers: { cookie: sessionCookie, 'x-csrf-token': csrfToken },
+      payload: { fromSlot: 3, toSlot: 4, quantity: 5, idempotencyKey: 'shared-split-key' }
+    });
+    expect(splitRes1.statusCode).toBe(200);
+    const splitBody1 = splitRes1.json() as { idempotentReplay: boolean };
+    expect(splitBody1.idempotentReplay).toBe(false);
+
+    // Split slot 3 to slot 4 with quantity 8 and same key S1 -> 409 IDEMPOTENCY_KEY_CONFLICT
+    const splitConflictRes = await server.inject({
+      method: 'POST',
+      url: `/characters/${character.id}/inventory/split`,
+      headers: { cookie: sessionCookie, 'x-csrf-token': csrfToken },
+      payload: { fromSlot: 3, toSlot: 4, quantity: 8, idempotencyKey: 'shared-split-key' }
+    });
+    expect(splitConflictRes.statusCode).toBe(409);
+
+    // Replay original split 3 to 4 with quantity 5 -> 200 SUCCESS idempotentReplay
+    const replaySplitRes = await server.inject({
+      method: 'POST',
+      url: `/characters/${character.id}/inventory/split`,
+      headers: { cookie: sessionCookie, 'x-csrf-token': csrfToken },
+      payload: { fromSlot: 3, toSlot: 4, quantity: 5, idempotencyKey: 'shared-split-key' }
+    });
+    expect(replaySplitRes.statusCode).toBe(200);
+    const replaySplitBody = replaySplitRes.json() as { idempotentReplay: boolean };
+    expect(replaySplitBody.idempotentReplay).toBe(true);
+
+    // Economy reconciliation after all operations
+    const recon = await reconcileCharacterEconomy(pool, character.id);
+    expect(recon.isLootReconciled).toBe(true);
+    expect(recon.totalClaimedItemsByCode['copper-coin']).toBe(20);
+    expect(recon.totalUnclaimedItemsByCode['rusted-blade']).toBe(1);
+  });
+
+  it('P1: handles concurrent opposite moves (A->B and B->A), concurrent claims, splits and merges without deadlocks', async () => {
+    const { character } = await createTestAccountAndCharacter('ConcurrentMoves');
+    const containerRes = await pool.query<{ id: string }>(
+      'SELECT id FROM inventory_containers WHERE character_id = $1 AND container_type = $2',
+      [character.id, 'backpack']
+    );
+    const containerId = containerRes.rows[0]?.id;
+    if (!containerId) throw new Error('Container not found');
+
+    // Seed slot 0 with 50 copper-coin and slot 1 with 1 rusted-blade
+    await pool.query(
+      `INSERT INTO inventory_instances (id, character_id, container_id, slot_index, item_id, quantity)
+       VALUES
+         ($1, $2, $3, 0, 'copper-coin', 50),
+         ($4, $2, $3, 1, 'rusted-blade', 1)`,
+      [randomUUID(), character.id, containerId, randomUUID()]
+    );
+
+    // Run 20 concurrent move operations with opposing directions (0->1 vs 1->0)
+    const promises: Promise<unknown>[] = [];
+    for (let i = 0; i < 20; i++) {
+      const from = i % 2 === 0 ? 0 : 1;
+      const to = i % 2 === 0 ? 1 : 0;
+      promises.push(
+        moveInventoryItem(pool, {
+          characterId: character.id,
+          fromSlot: from,
+          toSlot: to,
+          idempotencyKey: `concurrent-move-${i}`
+        })
+      );
+    }
+
+    const results = await Promise.allSettled(promises);
+    for (const r of results) {
+      expect(r.status).toBe('fulfilled');
+    }
+
+    // Verify inventory consistency: exactly 2 items, total quantities preserved (50 and 1)
+    const inv = await getCharacterInventory(pool, character.id);
+    expect(inv.slots).toHaveLength(2);
+    const coins = inv.slots.find((s) => s.itemId === 'copper-coin');
+    const blade = inv.slots.find((s) => s.itemId === 'rusted-blade');
+    expect(coins?.quantity).toBe(50);
+    expect(blade?.quantity).toBe(1);
+  });
+
+  it('P1: executes claim, move, split and idempotent replays successfully on a pool with maxConnections = 1 without hanging', async () => {
+    const oneConnPool = createDatabasePool({ ...dbConfig, maxConnections: 1 });
+    try {
+      const { character } = await createTestAccountAndCharacter('PoolSizeOne');
+      const huntId = randomUUID();
+      const segId = randomUUID();
+      const rewardId = randomUUID();
+
+      await oneConnPool.query(
+        `INSERT INTO hunts (id, character_id, start_idempotency_key, zone_id, strategy, status, started_at, settled_until, completed_at, simulation_version, config_digest, private_checkpoint, reserved_hp_potions, reserved_mp_potions, potions_returned, row_version)
+         VALUES ($1, $2, $3, 'damp-catacombs', 'balanced', 'COMPLETED', NOW() - INTERVAL '1 hour', NOW(), NOW(), '1.0.0', 'hash', '{"simulatedEvents":10}'::jsonb, 0, 0, true, 1)`,
+        [huntId, character.id, randomUUID()]
+      );
+      await oneConnPool.query(
+        `INSERT INTO hunt_segments (id, hunt_id, segment_key, start_checkpoint_version, end_checkpoint_version, segment_from, segment_to, processed_duration_ms, simulated_events, stop_reason, is_partial, rewards, committed_at)
+         VALUES ($1, $2, $3, 1, 2, NOW() - INTERVAL '1 hour', NOW(), 3600000, 10, 'TIME_REACHED', false, '{"deltaXpGained":100,"deltaGoldGained":50,"deltaLootByItem":{"copper-coin":50}}'::jsonb, NOW())`,
+        [segId, huntId, randomUUID()]
+      );
+      await oneConnPool.query(
+        `INSERT INTO hunt_reward_items (id, hunt_id, hunt_segment_id, character_id, item_id, quantity, ownership_state)
+         VALUES ($1, $2, $3, $4, 'copper-coin', 50, 'UNCLAIMED')`,
+        [rewardId, huntId, segId, character.id]
+      );
+
+      // 1. Claim on maxConnections = 1
+      const claimResult = await claimHuntReward(oneConnPool, {
+        characterId: character.id,
+        rewardId,
+        idempotencyKey: 'pool-one-claim-1'
+      });
+      expect(claimResult.status).toBe('SUCCESS');
+      if (claimResult.status === 'SUCCESS') {
+        expect(claimResult.claimedItem.quantity).toBe(50);
+        expect(claimResult.inventory.slots).toHaveLength(1);
+      }
+
+      // 2. Replay claim on maxConnections = 1
+      const claimReplay = await claimHuntReward(oneConnPool, {
+        characterId: character.id,
+        rewardId,
+        idempotencyKey: 'pool-one-claim-1'
+      });
+      expect(claimReplay.status).toBe('SUCCESS');
+      if (claimReplay.status === 'SUCCESS') {
+        expect(claimReplay.idempotentReplay).toBe(true);
+      }
+
+      // 3. Move on maxConnections = 1
+      const moveResult = await moveInventoryItem(oneConnPool, {
+        characterId: character.id,
+        fromSlot: 0,
+        toSlot: 5,
+        idempotencyKey: 'pool-one-move-1'
+      });
+      expect(moveResult.status).toBe('SUCCESS');
+      if (moveResult.status === 'SUCCESS') {
+        expect(moveResult.action).toBe('MOVED');
+        expect(moveResult.inventory.slots[0]?.slotIndex).toBe(5);
+      }
+
+      // 4. Replay move on maxConnections = 1
+      const moveReplay = await moveInventoryItem(oneConnPool, {
+        characterId: character.id,
+        fromSlot: 0,
+        toSlot: 5,
+        idempotencyKey: 'pool-one-move-1'
+      });
+      expect(moveReplay.status).toBe('SUCCESS');
+      if (moveReplay.status === 'SUCCESS') {
+        expect(moveReplay.action).toBe('MOVED');
+        expect(moveReplay.idempotentReplay).toBe(true);
+      }
+
+      // 5. Split on maxConnections = 1
+      const splitResult = await splitInventoryStack(oneConnPool, {
+        characterId: character.id,
+        fromSlot: 5,
+        toSlot: 8,
+        quantity: 20,
+        idempotencyKey: 'pool-one-split-1'
+      });
+      expect(splitResult.status).toBe('SUCCESS');
+      if (splitResult.status === 'SUCCESS') {
+        expect(splitResult.inventory.slots).toHaveLength(2);
+      }
+
+      // 6. Replay split on maxConnections = 1
+      const splitReplay = await splitInventoryStack(oneConnPool, {
+        characterId: character.id,
+        fromSlot: 5,
+        toSlot: 8,
+        quantity: 20,
+        idempotencyKey: 'pool-one-split-1'
+      });
+      expect(splitReplay.status).toBe('SUCCESS');
+      if (splitReplay.status === 'SUCCESS') {
+        expect(splitReplay.idempotentReplay).toBe(true);
+      }
+
+      // Economy reconciliation on oneConnPool
+      const recon = await reconcileCharacterEconomy(oneConnPool, character.id);
+      expect(recon.isLootReconciled).toBe(true);
+      expect(recon.totalClaimedItemsByCode['copper-coin']).toBe(50);
+    } finally {
+      await oneConnPool.end();
+    }
+  });
+
+  it('verifies complete economy reconciliation across all 12 items after claims, moves, and splits', async () => {
+    const { character } = await createTestAccountAndCharacter('FullReconciliation');
+    const huntId = randomUUID();
+    const segId = randomUUID();
+
+    await pool.query(
+      `INSERT INTO hunts (id, character_id, start_idempotency_key, zone_id, strategy, status, started_at, settled_until, completed_at, simulation_version, config_digest, private_checkpoint, reserved_hp_potions, reserved_mp_potions, potions_returned, row_version)
+       VALUES ($1, $2, $3, 'damp-catacombs', 'balanced', 'COMPLETED', NOW() - INTERVAL '1 hour', NOW(), NOW(), '1.0.0', 'hash', '{"simulatedEvents":10}'::jsonb, 0, 0, true, 1)`,
+      [huntId, character.id, randomUUID()]
+    );
+    const allLootMap: Record<string, number> = {};
+    for (const itemDef of ITEM_DEFINITIONS) {
+      allLootMap[itemDef.itemId] = 2;
+    }
+
+    await pool.query(
+      `INSERT INTO hunt_segments (id, hunt_id, segment_key, start_checkpoint_version, end_checkpoint_version, segment_from, segment_to, processed_duration_ms, simulated_events, stop_reason, is_partial, rewards, committed_at)
+       VALUES ($1, $2, $3, 1, 2, NOW() - INTERVAL '1 hour', NOW(), 3600000, 10, 'TIME_REACHED', false, $4::jsonb, NOW())`,
+      [segId, huntId, randomUUID(), JSON.stringify({ deltaXpGained: 100, deltaGoldGained: 50, deltaLootByItem: allLootMap })]
+    );
+
+    // Insert 12 distinct item rewards
+    const rewardIds: string[] = [];
+    for (const itemDef of ITEM_DEFINITIONS) {
+      const rid = randomUUID();
+      rewardIds.push(rid);
+      await pool.query(
+        `INSERT INTO hunt_reward_items (id, hunt_id, hunt_segment_id, character_id, item_id, quantity, ownership_state)
+         VALUES ($1, $2, $3, $4, $5, 2, 'UNCLAIMED')`,
+        [rid, huntId, segId, character.id, itemDef.itemId]
+      );
+    }
+
+    // Claim first 5 items into backpack
+    for (let i = 0; i < 5; i++) {
+      const rid = rewardIds[i];
+      if (!rid) continue;
+      const res = await claimHuntReward(pool, {
+        characterId: character.id,
+        rewardId: rid,
+        idempotencyKey: `econ-claim-${i}`
+      });
+      expect(res.status).toBe('SUCCESS');
+    }
+
+    // Reconcile: 5 claimed, 7 unclaimed, ledger consistent
+    const recon1 = await reconcileCharacterEconomy(pool, character.id);
+    expect(recon1.isLootReconciled).toBe(true);
+    expect(Object.keys(recon1.totalClaimedItemsByCode)).toHaveLength(5);
+    expect(Object.keys(recon1.totalUnclaimedItemsByCode)).toHaveLength(7);
+
+    // Perform move and split
+    const moveRes = await moveInventoryItem(pool, {
+      characterId: character.id,
+      fromSlot: 0,
+      toSlot: 15,
+      idempotencyKey: 'econ-move-1'
+    });
+    expect(moveRes.status).toBe('SUCCESS');
+
+    // Split stack if slot 15 is stackable
+    const inv = await getCharacterInventory(pool, character.id);
+    const slot15 = inv.slots.find((s) => s.slotIndex === 15);
+    if (slot15 && slot15.stackable && slot15.quantity >= 2) {
+      const splitRes = await splitInventoryStack(pool, {
+        characterId: character.id,
+        fromSlot: 15,
+        toSlot: 16,
+        quantity: 1,
+        idempotencyKey: 'econ-split-1'
+      });
+      expect(splitRes.status).toBe('SUCCESS');
+    }
+
+    // Reconcile again: must remain 100% reconciled
+    const recon2 = await reconcileCharacterEconomy(pool, character.id);
+    expect(recon2.isLootReconciled).toBe(true);
+    expect(Object.keys(recon2.totalClaimedItemsByCode)).toHaveLength(5);
+    expect(Object.keys(recon2.totalUnclaimedItemsByCode)).toHaveLength(7);
+  });
 });

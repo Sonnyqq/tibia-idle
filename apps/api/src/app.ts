@@ -1086,6 +1086,15 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
     if (result.status === 'ITEM_NOT_FOUND') {
       return sendApiError(reply, request, 404, 'ITEM_NOT_FOUND', 'error.itemNotFound');
     }
+    if (result.status === 'IDEMPOTENCY_KEY_CONFLICT') {
+      return sendApiError(
+        reply,
+        request,
+        409,
+        'IDEMPOTENCY_KEY_CONFLICT',
+        'error.idempotencyConflict'
+      );
+    }
     if (result.status === 'INVENTORY_FULL') {
       return sendApiError(reply, request, 400, 'INVENTORY_FULL', 'error.inventoryFull');
     }
@@ -1149,6 +1158,15 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
 
     if (result.status === 'ITEM_NOT_FOUND') {
       return sendApiError(reply, request, 404, 'ITEM_NOT_FOUND', 'error.itemNotFound');
+    }
+    if (result.status === 'IDEMPOTENCY_KEY_CONFLICT') {
+      return sendApiError(
+        reply,
+        request,
+        409,
+        'IDEMPOTENCY_KEY_CONFLICT',
+        'error.idempotencyConflict'
+      );
     }
     if (result.status === 'INVALID_QUANTITY') {
       return sendApiError(reply, request, 400, 'INVALID_QUANTITY', 'error.invalidQuantity');
@@ -1217,6 +1235,15 @@ export function buildApiServer(options: ApiServerOptions = {}): FastifyInstance 
 
       if (result.status === 'REWARD_NOT_FOUND') {
         return sendApiError(reply, request, 404, 'REWARD_NOT_FOUND', 'error.rewardNotFound');
+      }
+      if (result.status === 'IDEMPOTENCY_KEY_CONFLICT') {
+        return sendApiError(
+          reply,
+          request,
+          409,
+          'IDEMPOTENCY_KEY_CONFLICT',
+          'error.idempotencyConflict'
+        );
       }
       if (result.status === 'REWARD_ALREADY_CLAIMED') {
         return sendApiError(reply, request, 409, 'REWARD_ALREADY_CLAIMED', 'error.rewardAlreadyClaimed');

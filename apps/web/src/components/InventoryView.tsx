@@ -5,7 +5,7 @@ import {
   type InventorySlotItemDto
 } from '@tibia-idle/contracts';
 import { type SupportedLocale, t, type TranslationKey } from '@tibia-idle/i18n';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { EQUIPMENT_SLOT_KEY_MAP, RARITY_KEY_MAP } from '../lib/format.js';
 import { GameButton, GameTooltip, GameWindow, ItemSlot } from './ui/GameUi.js';
 
@@ -47,6 +47,7 @@ export function InventoryView({
   const [selectedBackpackSlot, setSelectedBackpackSlot] = useState<number | null>(null);
   const [splitQuantity, setSplitQuantity] = useState<number>(1);
   const [isSplitting, setIsSplitting] = useState<boolean>(false);
+  const isSubmittingRef = useRef<boolean>(false);
 
   const paperdollLabel = t(locale, EQUIPMENT_SLOT_KEY_MAP[selectedPaperdollSlot]);
   const emptyText = t(locale, 'inventory.slotEmpty');
@@ -63,15 +64,20 @@ export function InventoryView({
     selectedBackpackSlot !== null ? (slotMap.get(selectedBackpackSlot) ?? null) : null;
 
   const handleBackpackSlotClick = async (slotIndex: number) => {
-    if (actionLoading) return;
+    if (actionLoading || isSubmittingRef.current) return;
 
     if (isSplitting) {
       if (selectedBackpackSlot !== null && slotIndex !== selectedBackpackSlot) {
         // Target slot selected for split
         if (!slotMap.has(slotIndex)) {
-          await onSplitStack(selectedBackpackSlot, slotIndex, splitQuantity);
-          setIsSplitting(false);
-          setSelectedBackpackSlot(null);
+          isSubmittingRef.current = true;
+          try {
+            await onSplitStack(selectedBackpackSlot, slotIndex, splitQuantity);
+            setIsSplitting(false);
+            setSelectedBackpackSlot(null);
+          } finally {
+            isSubmittingRef.current = false;
+          }
         }
       }
       return;
@@ -89,8 +95,13 @@ export function InventoryView({
         setSelectedBackpackSlot(null);
       } else {
         // Different slot -> Move or swap!
-        await onMoveItem(selectedBackpackSlot, slotIndex);
-        setSelectedBackpackSlot(null);
+        isSubmittingRef.current = true;
+        try {
+          await onMoveItem(selectedBackpackSlot, slotIndex);
+          setSelectedBackpackSlot(null);
+        } finally {
+          isSubmittingRef.current = false;
+        }
       }
     }
   };
@@ -102,12 +113,18 @@ export function InventoryView({
   };
 
   const handleAutoSplitToFirstFree = async () => {
+    if (actionLoading || isSubmittingRef.current) return;
     if (!selectedItem || selectedBackpackSlot === null) return;
     const firstFree = containerSlots.find((s) => !slotMap.has(s));
     if (firstFree !== undefined) {
-      await onSplitStack(selectedBackpackSlot, firstFree, splitQuantity);
-      setIsSplitting(false);
-      setSelectedBackpackSlot(null);
+      isSubmittingRef.current = true;
+      try {
+        await onSplitStack(selectedBackpackSlot, firstFree, splitQuantity);
+        setIsSplitting(false);
+        setSelectedBackpackSlot(null);
+      } finally {
+        isSubmittingRef.current = false;
+      }
     }
   };
 
@@ -212,7 +229,6 @@ export function InventoryView({
                   className={`backpack-slot-cell ${isSelected ? 'slot-cell-selected' : ''} ${
                     isTargetPrompt ? 'slot-cell-target' : ''
                   }`}
-                  onClick={() => void handleBackpackSlotClick(slotIndex)}
                 >
                   <ItemSlot
                     testId={`backpack-slot-${slotIndex}`}

@@ -56,6 +56,7 @@ export type ClaimHuntRewardResult =
   | { readonly status: 'REWARD_ALREADY_CLAIMED' }
   | { readonly status: 'INVENTORY_FULL' }
   | { readonly status: 'CAPACITY_EXCEEDED' }
+  | { readonly status: 'IDEMPOTENCY_KEY_CONFLICT' }
   | { readonly status: 'FORBIDDEN' };
 
 export interface MoveInventoryItemInput {
@@ -76,6 +77,7 @@ export type MoveInventoryItemResult =
   | { readonly status: 'ITEM_NOT_FOUND' }
   | { readonly status: 'INVENTORY_FULL' }
   | { readonly status: 'CAPACITY_EXCEEDED' }
+  | { readonly status: 'IDEMPOTENCY_KEY_CONFLICT' }
   | { readonly status: 'FORBIDDEN' };
 
 export interface SplitInventoryStackInput {
@@ -97,6 +99,7 @@ export type SplitInventoryStackResult =
   | { readonly status: 'INVALID_QUANTITY' }
   | { readonly status: 'STACK_INCOMPATIBLE' }
   | { readonly status: 'INVENTORY_FULL' }
+  | { readonly status: 'IDEMPOTENCY_KEY_CONFLICT' }
   | { readonly status: 'FORBIDDEN' };
 
 function mapSlotItemDto(row: InventoryInstanceDbRow): InventorySlotItemDto {
@@ -123,14 +126,34 @@ function mapSlotItemDto(row: InventoryInstanceDbRow): InventorySlotItemDto {
   };
 }
 
+async function withTransactionRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn();
+    } catch (err: unknown) {
+      attempt++;
+      const code = (err as { code?: string } | null)?.code;
+      if (attempt <= maxRetries && (code === '40P01' || code === '40001')) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, 10 * attempt + Math.floor(Math.random() * 20))
+        );
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 async function getOrCreateBackpackContainer(
   client: pg.PoolClient | pg.Pool,
-  characterId: string
+  characterId: string,
+  forUpdate = false
 ): Promise<InventoryContainerDbRow> {
-  const selectRes = await client.query<InventoryContainerDbRow>(
-    `SELECT * FROM inventory_containers WHERE character_id = $1 AND container_type = 'backpack' LIMIT 1`,
-    [characterId]
-  );
+  const query = `SELECT * FROM inventory_containers WHERE character_id = $1 AND container_type = 'backpack' ${
+    forUpdate ? 'FOR UPDATE' : ''
+  } LIMIT 1`;
+  const selectRes = await client.query<InventoryContainerDbRow>(query, [characterId]);
   if (selectRes.rows[0]) {
     return selectRes.rows[0];
   }
@@ -223,21 +246,97 @@ export async function claimHuntReward(
   pool: pg.Pool,
   input: ClaimHuntRewardInput
 ): Promise<ClaimHuntRewardResult> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
+  return withTransactionRetry(async () => {
+    const client = await pool.connect();
+    let committed = false;
+    try {
+      await client.query('BEGIN');
 
-    // 1. Idempotency replay check
-    const replayRes = await client.query<{ id: string; item_id: string; quantity: number }>(
-      `SELECT id, item_id, quantity
-       FROM inventory_movements
-       WHERE character_id = $1 AND operation_type = 'CLAIM_HUNT_REWARD' AND operation_key = $2
-       LIMIT 1`,
-      [input.characterId, input.idempotencyKey]
-    );
+      // 1. Uniform lock order: Lock character first
+      const charRes = await client.query<{ vocation: VocationDto; level: number }>(
+        `SELECT vocation, level FROM characters WHERE id = $1 FOR UPDATE`,
+        [input.characterId]
+      );
+      const charRow = charRes.rows[0];
+      if (!charRow) {
+        await client.query('ROLLBACK');
+        return { status: 'FORBIDDEN' };
+      }
 
-    if (replayRes.rows[0]) {
-      // Already committed with this idempotencyKey
+      // 2. Lock backpack container
+      const container = await getOrCreateBackpackContainer(client, input.characterId, true);
+
+      // 3. Idempotency replay check with canonical payload validation
+      const replayRes = await client.query<{
+        id: string;
+        item_id: string;
+        quantity: number;
+        source_reference: string | null;
+      }>(
+        `SELECT id, item_id, quantity, source_reference
+         FROM inventory_movements
+         WHERE character_id = $1 AND operation_type = 'CLAIM_HUNT_REWARD' AND operation_key = $2
+         LIMIT 1`,
+        [input.characterId, input.idempotencyKey]
+      );
+
+      if (replayRes.rows[0]) {
+        const movement = replayRes.rows[0];
+        // Canonical payload validation: does this movement refer to the exact same rewardId?
+        if (movement.source_reference !== input.rewardId) {
+          await client.query('ROLLBACK');
+          return { status: 'IDEMPOTENCY_KEY_CONFLICT' };
+        }
+
+        // Fetch the actual claimed reward row
+        const rewardRes = await client.query<{
+          id: string;
+          hunt_id: string;
+          hunt_segment_id: string;
+          character_id: string;
+          item_id: string;
+          quantity: number;
+          ownership_state: 'UNCLAIMED' | 'CLAIMED';
+          claimed_at: Date | null;
+          created_at: Date;
+        }>(
+          `SELECT * FROM hunt_reward_items WHERE id = $1 AND character_id = $2 LIMIT 1`,
+          [input.rewardId, input.characterId]
+        );
+        const rewardRow = rewardRes.rows[0];
+        if (!rewardRow || rewardRow.ownership_state !== 'CLAIMED') {
+          await client.query('ROLLBACK');
+          return { status: 'REWARD_NOT_FOUND' };
+        }
+
+        const def = getItemDefinition(rewardRow.item_id);
+        const claimedItem: CharacterHuntRewardItemDto = {
+          id: rewardRow.id,
+          huntId: rewardRow.hunt_id,
+          huntSegmentId: rewardRow.hunt_segment_id,
+          itemId: rewardRow.item_id,
+          nameKey: def?.nameKey ?? `item.${rewardRow.item_id}`,
+          rarity: (def?.rarity ?? 'common') as ItemRarityDto,
+          quantity: rewardRow.quantity,
+          ownershipState: 'CLAIMED',
+          claimedAtIso: rewardRow.claimed_at
+            ? rewardRow.claimed_at.toISOString()
+            : new Date().toISOString(),
+          createdAtIso: rewardRow.created_at.toISOString()
+        };
+
+        const inventory = await getCharacterInventory(client, input.characterId);
+        await client.query('COMMIT');
+        committed = true;
+        return {
+          status: 'SUCCESS',
+          claimedItem,
+          inventory,
+          idempotentReplay: true
+        };
+      }
+
+      // 4. Lock hunt reward row FOR UPDATE
       const rewardRes = await client.query<{
         id: string;
         hunt_id: string;
@@ -249,80 +348,22 @@ export async function claimHuntReward(
         claimed_at: Date | null;
         created_at: Date;
       }>(
-        `SELECT * FROM hunt_reward_items WHERE id = $1 AND character_id = $2 LIMIT 1`,
+        `SELECT * FROM hunt_reward_items WHERE id = $1 AND character_id = $2 FOR UPDATE`,
         [input.rewardId, input.characterId]
       );
+
       const rewardRow = rewardRes.rows[0];
       if (!rewardRow) {
         await client.query('ROLLBACK');
         return { status: 'REWARD_NOT_FOUND' };
       }
 
-      const def = getItemDefinition(rewardRow.item_id);
-      const claimedItem: CharacterHuntRewardItemDto = {
-        id: rewardRow.id,
-        huntId: rewardRow.hunt_id,
-        huntSegmentId: rewardRow.hunt_segment_id,
-        itemId: rewardRow.item_id,
-        nameKey: def?.nameKey ?? `item.${rewardRow.item_id}`,
-        rarity: (def?.rarity ?? 'common') as ItemRarityDto,
-        quantity: rewardRow.quantity,
-        ownershipState: 'CLAIMED',
-        claimedAtIso: rewardRow.claimed_at ? rewardRow.claimed_at.toISOString() : new Date().toISOString(),
-        createdAtIso: rewardRow.created_at.toISOString()
-      };
+      if (rewardRow.ownership_state === 'CLAIMED') {
+        await client.query('ROLLBACK');
+        return { status: 'REWARD_ALREADY_CLAIMED' };
+      }
 
-      const inventory = await getCharacterInventory(client, input.characterId);
-      await client.query('COMMIT');
-      return {
-        status: 'SUCCESS',
-        claimedItem,
-        inventory,
-        idempotentReplay: true
-      };
-    }
-
-    // 2. Lock hunt reward row
-    const rewardRes = await client.query<{
-      id: string;
-      hunt_id: string;
-      hunt_segment_id: string;
-      character_id: string;
-      item_id: string;
-      quantity: number;
-      ownership_state: 'UNCLAIMED' | 'CLAIMED';
-      claimed_at: Date | null;
-      created_at: Date;
-    }>(
-      `SELECT * FROM hunt_reward_items WHERE id = $1 AND character_id = $2 FOR UPDATE`,
-      [input.rewardId, input.characterId]
-    );
-
-    const rewardRow = rewardRes.rows[0];
-    if (!rewardRow) {
-      await client.query('ROLLBACK');
-      return { status: 'REWARD_NOT_FOUND' };
-    }
-
-    if (rewardRow.ownership_state === 'CLAIMED') {
-      await client.query('ROLLBACK');
-      return { status: 'REWARD_ALREADY_CLAIMED' };
-    }
-
-    // 3. Lock character & backpack container
-    const charRes = await client.query<{ vocation: VocationDto; level: number }>(
-      `SELECT vocation, level FROM characters WHERE id = $1 FOR UPDATE`,
-      [input.characterId]
-    );
-    const charRow = charRes.rows[0];
-    if (!charRow) {
-      await client.query('ROLLBACK');
-      return { status: 'FORBIDDEN' };
-    }
-
-    const container = await getOrCreateBackpackContainer(client, input.characterId);
-
-    // 4. Lock current items in backpack
+      // 5. Lock current items in backpack in slot_index ASC order
     const existingItemsRes = await client.query<InventoryInstanceDbRow>(
       `SELECT * FROM inventory_instances
        WHERE character_id = $1 AND container_id = $2
@@ -460,157 +501,234 @@ export async function claimHuntReward(
       await input.faultHook('BEFORE_COMMIT');
     }
 
-    await client.query('COMMIT');
+      await client.query('COMMIT');
+      committed = true;
 
-    if (input.faultHook) {
-      await input.faultHook('AFTER_COMMIT');
+      if (input.faultHook) {
+        await input.faultHook('AFTER_COMMIT');
+      }
+
+      const claimedItem: CharacterHuntRewardItemDto = {
+        id: rewardRow.id,
+        huntId: rewardRow.hunt_id,
+        huntSegmentId: rewardRow.hunt_segment_id,
+        itemId: rewardRow.item_id,
+        nameKey: itemDef.nameKey,
+        rarity: itemDef.rarity,
+        quantity: rewardRow.quantity,
+        ownershipState: 'CLAIMED',
+        claimedAtIso: nowIso,
+        createdAtIso: rewardRow.created_at.toISOString()
+      };
+
+      // Pool size 1 safe: use client after COMMIT
+      const inventory = await getCharacterInventory(client, input.characterId);
+
+      return {
+        status: 'SUCCESS',
+        claimedItem,
+        inventory,
+        idempotentReplay: false
+      };
+    } catch (err) {
+      if (!committed) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Ignore rollback errors on broken connection
+        }
+      }
+      throw err;
+    } finally {
+      client.release();
     }
-
-    const claimedItem: CharacterHuntRewardItemDto = {
-      id: rewardRow.id,
-      huntId: rewardRow.hunt_id,
-      huntSegmentId: rewardRow.hunt_segment_id,
-      itemId: rewardRow.item_id,
-      nameKey: itemDef.nameKey,
-      rarity: itemDef.rarity,
-      quantity: rewardRow.quantity,
-      ownershipState: 'CLAIMED',
-      claimedAtIso: nowIso,
-      createdAtIso: rewardRow.created_at.toISOString()
-    };
-
-    const inventory = await getCharacterInventory(pool, input.characterId);
-
-    return {
-      status: 'SUCCESS',
-      claimedItem,
-      inventory,
-      idempotentReplay: false
-    };
-  } catch (err) {
-    try {
-      await client.query('ROLLBACK');
-    } catch {
-      // Ignore rollback errors on broken connection
-    }
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export async function moveInventoryItem(
   pool: pg.Pool,
   input: MoveInventoryItemInput
 ): Promise<MoveInventoryItemResult> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
+  return withTransactionRetry(async () => {
+    const client = await pool.connect();
+    let committed = false;
+    try {
+      await client.query('BEGIN');
 
-    // 1. Idempotency check
-    const replayRes = await client.query<{ id: string }>(
-      `SELECT id FROM inventory_movements
-       WHERE character_id = $1 AND operation_type = 'MOVE_ITEM' AND operation_key = $2
-       LIMIT 1`,
-      [input.characterId, input.idempotencyKey]
-    );
-    if (replayRes.rows[0]) {
-      const inventory = await getCharacterInventory(client, input.characterId);
-      await client.query('COMMIT');
-      return {
-        status: 'SUCCESS',
-        action: 'MOVED',
-        inventory,
-        idempotentReplay: true
-      };
-    }
-
-    const container = await getOrCreateBackpackContainer(client, input.characterId);
-    if (input.fromSlot < 0 || input.fromSlot >= container.slot_capacity) {
-      await client.query('ROLLBACK');
-      return { status: 'ITEM_NOT_FOUND' };
-    }
-    if (input.toSlot < 0 || input.toSlot >= container.slot_capacity) {
-      await client.query('ROLLBACK');
-      return { status: 'INVENTORY_FULL' };
-    }
-
-    if (input.fromSlot === input.toSlot) {
-      const inventory = await getCharacterInventory(client, input.characterId);
-      await client.query('COMMIT');
-      return {
-        status: 'SUCCESS',
-        action: 'MOVED',
-        inventory,
-        idempotentReplay: false
-      };
-    }
-
-    // 2. Lock items at fromSlot and toSlot
-    const fromItemRes = await client.query<InventoryInstanceDbRow>(
-      `SELECT * FROM inventory_instances
-       WHERE character_id = $1 AND container_id = $2 AND slot_index = $3
-       FOR UPDATE`,
-      [input.characterId, container.id, input.fromSlot]
-    );
-    const fromItem = fromItemRes.rows[0];
-    if (!fromItem) {
-      await client.query('ROLLBACK');
-      return { status: 'ITEM_NOT_FOUND' };
-    }
-
-    const toItemRes = await client.query<InventoryInstanceDbRow>(
-      `SELECT * FROM inventory_instances
-       WHERE character_id = $1 AND container_id = $2 AND slot_index = $3
-       FOR UPDATE`,
-      [input.characterId, container.id, input.toSlot]
-    );
-    const toItem = toItemRes.rows[0];
-
-    let action: 'MOVED' | 'MERGED' | 'SWAPPED' = 'MOVED';
-
-    if (!toItem) {
-      // Empty target slot -> simple move
-      await client.query(
-        `UPDATE inventory_instances
-         SET slot_index = $1, row_version = row_version + 1
-         WHERE id = $2`,
-        [input.toSlot, fromItem.id]
+      // 1. Uniform lock order: Lock character first
+      const charRes = await client.query<{ id: string }>(
+        `SELECT id FROM characters WHERE id = $1 FOR UPDATE`,
+        [input.characterId]
       );
-      action = 'MOVED';
-    } else {
-      const def = getItemDefinition(fromItem.item_id);
-      if (fromItem.item_id === toItem.item_id && def && def.stackable) {
-        const space = def.maxStackSize - toItem.quantity;
-        if (space > 0) {
-          if (fromItem.quantity <= space) {
-            // Full merge into toSlot!
-            await client.query(
-              `UPDATE inventory_instances
-               SET quantity = quantity + $1, row_version = row_version + 1
-               WHERE id = $2`,
-              [fromItem.quantity, toItem.id]
-            );
-            await client.query(`DELETE FROM inventory_instances WHERE id = $1`, [fromItem.id]);
-            action = 'MERGED';
+      if (!charRes.rows[0]) {
+        await client.query('ROLLBACK');
+        return { status: 'FORBIDDEN' };
+      }
+
+      // 2. Lock container
+      const container = await getOrCreateBackpackContainer(client, input.characterId, true);
+      if (input.containerId && input.containerId !== container.id) {
+        await client.query('ROLLBACK');
+        return { status: 'FORBIDDEN' };
+      }
+
+      // 3. Idempotency check with canonical payload validation
+      const replayRes = await client.query<{
+        id: string;
+        source_reference: string | null;
+        item_id: string;
+        quantity: number;
+      }>(
+        `SELECT id, source_reference, item_id, quantity
+         FROM inventory_movements
+         WHERE character_id = $1 AND operation_type = 'MOVE_ITEM' AND operation_key = $2
+         LIMIT 1`,
+        [input.characterId, input.idempotencyKey]
+      );
+
+      if (replayRes.rows[0]) {
+        const rawRef = replayRes.rows[0].source_reference ?? '';
+        let matches = false;
+        let action: 'MOVED' | 'MERGED' | 'SWAPPED' = 'MOVED';
+
+        if (rawRef.startsWith('{')) {
+          try {
+            const payload = JSON.parse(rawRef) as {
+              containerId?: string;
+              fromSlot?: number;
+              toSlot?: number;
+              action?: 'MOVED' | 'MERGED' | 'SWAPPED';
+            };
+            if (
+              payload.fromSlot === input.fromSlot &&
+              payload.toSlot === input.toSlot &&
+              (!input.containerId || payload.containerId === input.containerId)
+            ) {
+              matches = true;
+              if (payload.action) {
+                action = payload.action;
+              }
+            }
+          } catch {
+            matches = false;
+          }
+        } else if (rawRef === `${input.fromSlot}->${input.toSlot}`) {
+          // Legacy string format
+          matches = true;
+          action = 'MOVED';
+        }
+
+        if (!matches) {
+          await client.query('ROLLBACK');
+          return { status: 'IDEMPOTENCY_KEY_CONFLICT' };
+        }
+
+        const inventory = await getCharacterInventory(client, input.characterId);
+        await client.query('COMMIT');
+        committed = true;
+        return {
+          status: 'SUCCESS',
+          action,
+          inventory,
+          idempotentReplay: true
+        };
+      }
+
+      // Slot bounds check
+      if (input.fromSlot < 0 || input.fromSlot >= container.slot_capacity) {
+        await client.query('ROLLBACK');
+        return { status: 'ITEM_NOT_FOUND' };
+      }
+      if (input.toSlot < 0 || input.toSlot >= container.slot_capacity) {
+        await client.query('ROLLBACK');
+        return { status: 'INVENTORY_FULL' };
+      }
+
+      if (input.fromSlot === input.toSlot) {
+        const inventory = await getCharacterInventory(client, input.characterId);
+        await client.query('COMMIT');
+        committed = true;
+        return {
+          status: 'SUCCESS',
+          action: 'MOVED',
+          inventory,
+          idempotentReplay: false
+        };
+      }
+
+      // 4. Deterministic lock: lock both slots in slot_index ASC order
+      const itemsRes = await client.query<InventoryInstanceDbRow>(
+        `SELECT * FROM inventory_instances
+         WHERE character_id = $1 AND container_id = $2 AND slot_index IN ($3, $4)
+         ORDER BY slot_index ASC
+         FOR UPDATE`,
+        [input.characterId, container.id, input.fromSlot, input.toSlot]
+      );
+
+      const fromItem = itemsRes.rows.find((i) => i.slot_index === input.fromSlot);
+      const toItem = itemsRes.rows.find((i) => i.slot_index === input.toSlot);
+
+      if (!fromItem) {
+        await client.query('ROLLBACK');
+        return { status: 'ITEM_NOT_FOUND' };
+      }
+
+      let action: 'MOVED' | 'MERGED' | 'SWAPPED' = 'MOVED';
+
+      if (!toItem) {
+        // Empty target slot -> simple move
+        await client.query(
+          `UPDATE inventory_instances
+           SET slot_index = $1, row_version = row_version + 1
+           WHERE id = $2`,
+          [input.toSlot, fromItem.id]
+        );
+        action = 'MOVED';
+      } else {
+        const def = getItemDefinition(fromItem.item_id);
+        if (fromItem.item_id === toItem.item_id && def && def.stackable) {
+          const space = def.maxStackSize - toItem.quantity;
+          if (space > 0) {
+            if (fromItem.quantity <= space) {
+              // Full merge into toSlot!
+              await client.query(
+                `UPDATE inventory_instances
+                 SET quantity = quantity + $1, row_version = row_version + 1
+                 WHERE id = $2`,
+                [fromItem.quantity, toItem.id]
+              );
+              await client.query(`DELETE FROM inventory_instances WHERE id = $1`, [fromItem.id]);
+              action = 'MERGED';
+            } else {
+              // Partial merge: fill toSlot, leave remainder in fromSlot
+              await client.query(
+                `UPDATE inventory_instances
+                 SET quantity = $1, row_version = row_version + 1
+                 WHERE id = $2`,
+                [def.maxStackSize, toItem.id]
+              );
+              await client.query(
+                `UPDATE inventory_instances
+                 SET quantity = quantity - $1, row_version = row_version + 1
+                 WHERE id = $2`,
+                [space, fromItem.id]
+              );
+              action = 'MERGED';
+            }
           } else {
-            // Partial merge: fill toSlot, leave remainder in fromSlot
+            // Target stack already full -> swap slots
             await client.query(
-              `UPDATE inventory_instances
-               SET quantity = $1, row_version = row_version + 1
-               WHERE id = $2`,
-              [def.maxStackSize, toItem.id]
+              `UPDATE inventory_instances SET slot_index = $1, row_version = row_version + 1 WHERE id = $2`,
+              [input.toSlot, fromItem.id]
             );
             await client.query(
-              `UPDATE inventory_instances
-               SET quantity = quantity - $1, row_version = row_version + 1
-               WHERE id = $2`,
-              [space, fromItem.id]
+              `UPDATE inventory_instances SET slot_index = $1, row_version = row_version + 1 WHERE id = $2`,
+              [input.fromSlot, toItem.id]
             );
-            action = 'MERGED';
+            action = 'SWAPPED';
           }
         } else {
-          // Target stack already full -> swap slots
+          // Different items or non-stackable -> swap slots
           await client.query(
             `UPDATE inventory_instances SET slot_index = $1, row_version = row_version + 1 WHERE id = $2`,
             [input.toSlot, fromItem.id]
@@ -621,173 +739,259 @@ export async function moveInventoryItem(
           );
           action = 'SWAPPED';
         }
-      } else {
-        // Different items or non-stackable -> swap slots
-        await client.query(
-          `UPDATE inventory_instances SET slot_index = $1, row_version = row_version + 1 WHERE id = $2`,
-          [input.toSlot, fromItem.id]
-        );
-        await client.query(
-          `UPDATE inventory_instances SET slot_index = $1, row_version = row_version + 1 WHERE id = $2`,
-          [input.fromSlot, toItem.id]
-        );
-        action = 'SWAPPED';
       }
+
+      // Record movement in audit log with canonical JSON payload including action
+      await client.query(
+        `INSERT INTO inventory_movements (
+           id, character_id, operation_type, operation_key, source_reference, item_id, quantity, created_at
+         )
+         VALUES ($1, $2, 'MOVE_ITEM', $3, $4, $5, $6, NOW())`,
+        [
+          randomUUID(),
+          input.characterId,
+          input.idempotencyKey,
+          JSON.stringify({
+            containerId: container.id,
+            fromSlot: input.fromSlot,
+            toSlot: input.toSlot,
+            action
+          }),
+          fromItem.item_id,
+          fromItem.quantity
+        ]
+      );
+
+      await client.query('COMMIT');
+      committed = true;
+
+      // Pool size 1 safe: use client after COMMIT
+      const inventory = await getCharacterInventory(client, input.characterId);
+      return {
+        status: 'SUCCESS',
+        action,
+        inventory,
+        idempotentReplay: false
+      };
+    } catch (err) {
+      if (!committed) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Ignore
+        }
+      }
+      throw err;
+    } finally {
+      client.release();
     }
-
-    // Record movement in audit log
-    await client.query(
-      `INSERT INTO inventory_movements (
-         id, character_id, operation_type, operation_key, source_reference, item_id, quantity, created_at
-       )
-       VALUES ($1, $2, 'MOVE_ITEM', $3, $4, $5, $6, NOW())`,
-      [
-        randomUUID(),
-        input.characterId,
-        input.idempotencyKey,
-        `${input.fromSlot}->${input.toSlot}`,
-        fromItem.item_id,
-        fromItem.quantity
-      ]
-    );
-
-    await client.query('COMMIT');
-
-    const inventory = await getCharacterInventory(pool, input.characterId);
-    return {
-      status: 'SUCCESS',
-      action,
-      inventory,
-      idempotentReplay: false
-    };
-  } catch (err) {
-    try {
-      await client.query('ROLLBACK');
-    } catch {
-      // Ignore
-    }
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export async function splitInventoryStack(
   pool: pg.Pool,
   input: SplitInventoryStackInput
 ): Promise<SplitInventoryStackResult> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
+  return withTransactionRetry(async () => {
+    const client = await pool.connect();
+    let committed = false;
+    try {
+      await client.query('BEGIN');
 
-    // 1. Idempotency check
-    const replayRes = await client.query<{ id: string }>(
-      `SELECT id FROM inventory_movements
-       WHERE character_id = $1 AND operation_type = 'SPLIT_STACK' AND operation_key = $2
-       LIMIT 1`,
-      [input.characterId, input.idempotencyKey]
-    );
-    if (replayRes.rows[0]) {
-      const inventory = await getCharacterInventory(client, input.characterId);
+      // 1. Uniform lock order: Lock character first
+      const charRes = await client.query<{ id: string }>(
+        `SELECT id FROM characters WHERE id = $1 FOR UPDATE`,
+        [input.characterId]
+      );
+      if (!charRes.rows[0]) {
+        await client.query('ROLLBACK');
+        return { status: 'FORBIDDEN' };
+      }
+
+      // 2. Lock container
+      const container = await getOrCreateBackpackContainer(client, input.characterId, true);
+      if (input.containerId && input.containerId !== container.id) {
+        await client.query('ROLLBACK');
+        return { status: 'FORBIDDEN' };
+      }
+
+      // 3. Idempotency check with canonical payload validation
+      const replayRes = await client.query<{
+        id: string;
+        source_reference: string | null;
+        quantity: number;
+      }>(
+        `SELECT id, source_reference, quantity
+         FROM inventory_movements
+         WHERE character_id = $1 AND operation_type = 'SPLIT_STACK' AND operation_key = $2
+         LIMIT 1`,
+        [input.characterId, input.idempotencyKey]
+      );
+
+      if (replayRes.rows[0]) {
+        const rawRef = replayRes.rows[0].source_reference ?? '';
+        let matches = false;
+
+        if (rawRef.startsWith('{')) {
+          try {
+            const payload = JSON.parse(rawRef) as {
+              containerId?: string;
+              fromSlot?: number;
+              toSlot?: number;
+              quantity?: number;
+            };
+            if (
+              payload.fromSlot === input.fromSlot &&
+              payload.toSlot === input.toSlot &&
+              payload.quantity === input.quantity &&
+              (!input.containerId || payload.containerId === input.containerId)
+            ) {
+              matches = true;
+            }
+          } catch {
+            matches = false;
+          }
+        } else if (
+          rawRef === `${input.fromSlot}->${input.toSlot}` &&
+          replayRes.rows[0].quantity === input.quantity
+        ) {
+          // Legacy string format
+          matches = true;
+        }
+
+        if (!matches) {
+          await client.query('ROLLBACK');
+          return { status: 'IDEMPOTENCY_KEY_CONFLICT' };
+        }
+
+        const inventory = await getCharacterInventory(client, input.characterId);
+        await client.query('COMMIT');
+        committed = true;
+        return {
+          status: 'SUCCESS',
+          inventory,
+          idempotentReplay: true
+        };
+      }
+
+      // Slot bounds check
+      if (input.fromSlot < 0 || input.fromSlot >= container.slot_capacity) {
+        await client.query('ROLLBACK');
+        return { status: 'ITEM_NOT_FOUND' };
+      }
+      if (input.toSlot < 0 || input.toSlot >= container.slot_capacity) {
+        await client.query('ROLLBACK');
+        return { status: 'INVENTORY_FULL' };
+      }
+      if (input.fromSlot === input.toSlot) {
+        await client.query('ROLLBACK');
+        return { status: 'INVALID_QUANTITY' };
+      }
+      if (!Number.isSafeInteger(input.quantity) || input.quantity <= 0) {
+        await client.query('ROLLBACK');
+        return { status: 'INVALID_QUANTITY' };
+      }
+
+      // 4. Deterministic lock: lock both slots in slot_index ASC order
+      const itemsRes = await client.query<InventoryInstanceDbRow>(
+        `SELECT * FROM inventory_instances
+         WHERE character_id = $1 AND container_id = $2 AND slot_index IN ($3, $4)
+         ORDER BY slot_index ASC
+         FOR UPDATE`,
+        [input.characterId, container.id, input.fromSlot, input.toSlot]
+      );
+
+      const fromItem = itemsRes.rows.find((i) => i.slot_index === input.fromSlot);
+      const toItem = itemsRes.rows.find((i) => i.slot_index === input.toSlot);
+
+      if (!fromItem) {
+        await client.query('ROLLBACK');
+        return { status: 'ITEM_NOT_FOUND' };
+      }
+
+      if (toItem) {
+        await client.query('ROLLBACK');
+        return { status: 'INVENTORY_FULL' };
+      }
+
+      const itemDef = getItemDefinition(fromItem.item_id);
+      if (!itemDef || !itemDef.stackable) {
+        await client.query('ROLLBACK');
+        return { status: 'STACK_INCOMPATIBLE' };
+      }
+
+      if (input.quantity >= fromItem.quantity) {
+        await client.query('ROLLBACK');
+        return { status: 'INVALID_QUANTITY' };
+      }
+
+      // Deduct from source stack
+      const newSourceQty = fromItem.quantity - input.quantity;
+      await client.query(
+        `UPDATE inventory_instances
+         SET quantity = $1, row_version = row_version + 1
+         WHERE id = $2`,
+        [newSourceQty, fromItem.id]
+      );
+
+      // Create new instance at target slot
+      await client.query(
+        `INSERT INTO inventory_instances (
+           id, character_id, container_id, slot_index, item_id, quantity, metadata, item_version, row_version, created_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb, 1, 1, NOW())`,
+        [
+          randomUUID(),
+          input.characterId,
+          container.id,
+          input.toSlot,
+          fromItem.item_id,
+          input.quantity
+        ]
+      );
+
+      // Record movement in audit log with canonical JSON payload
+      await client.query(
+        `INSERT INTO inventory_movements (
+           id, character_id, operation_type, operation_key, source_reference, item_id, quantity, created_at
+         )
+         VALUES ($1, $2, 'SPLIT_STACK', $3, $4, $5, $6, NOW())`,
+        [
+          randomUUID(),
+          input.characterId,
+          input.idempotencyKey,
+          JSON.stringify({
+            containerId: container.id,
+            fromSlot: input.fromSlot,
+            toSlot: input.toSlot,
+            quantity: input.quantity
+          }),
+          fromItem.item_id,
+          input.quantity
+        ]
+      );
+
       await client.query('COMMIT');
+      committed = true;
+
+      // Pool size 1 safe: use client after COMMIT
+      const inventory = await getCharacterInventory(client, input.characterId);
       return {
         status: 'SUCCESS',
         inventory,
-        idempotentReplay: true
+        idempotentReplay: false
       };
+    } catch (err) {
+      if (!committed) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Ignore
+        }
+      }
+      throw err;
+    } finally {
+      client.release();
     }
-
-    const container = await getOrCreateBackpackContainer(client, input.characterId);
-    if (input.fromSlot < 0 || input.fromSlot >= container.slot_capacity) {
-      await client.query('ROLLBACK');
-      return { status: 'ITEM_NOT_FOUND' };
-    }
-    if (input.toSlot < 0 || input.toSlot >= container.slot_capacity) {
-      await client.query('ROLLBACK');
-      return { status: 'INVENTORY_FULL' };
-    }
-
-    const fromItemRes = await client.query<InventoryInstanceDbRow>(
-      `SELECT * FROM inventory_instances
-       WHERE character_id = $1 AND container_id = $2 AND slot_index = $3
-       FOR UPDATE`,
-      [input.characterId, container.id, input.fromSlot]
-    );
-    const fromItem = fromItemRes.rows[0];
-    if (!fromItem) {
-      await client.query('ROLLBACK');
-      return { status: 'ITEM_NOT_FOUND' };
-    }
-
-    const def = getItemDefinition(fromItem.item_id);
-    if (!def || !def.stackable) {
-      await client.query('ROLLBACK');
-      return { status: 'STACK_INCOMPATIBLE' };
-    }
-
-    if (!Number.isSafeInteger(input.quantity) || input.quantity <= 0 || input.quantity >= fromItem.quantity) {
-      await client.query('ROLLBACK');
-      return { status: 'INVALID_QUANTITY' };
-    }
-
-    const toItemRes = await client.query<InventoryInstanceDbRow>(
-      `SELECT * FROM inventory_instances
-       WHERE character_id = $1 AND container_id = $2 AND slot_index = $3
-       FOR UPDATE`,
-      [input.characterId, container.id, input.toSlot]
-    );
-    if (toItemRes.rows[0]) {
-      await client.query('ROLLBACK');
-      return { status: 'INVENTORY_FULL' };
-    }
-
-    // Split stack: decrease source quantity, create new row at toSlot
-    await client.query(
-      `UPDATE inventory_instances
-       SET quantity = quantity - $1, row_version = row_version + 1
-       WHERE id = $2`,
-      [input.quantity, fromItem.id]
-    );
-
-    await client.query(
-      `INSERT INTO inventory_instances (
-         id, character_id, container_id, slot_index, item_id, quantity, metadata, item_version, row_version, created_at
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb, 1, 1, NOW())`,
-      [randomUUID(), input.characterId, container.id, input.toSlot, fromItem.item_id, input.quantity]
-    );
-
-    await client.query(
-      `INSERT INTO inventory_movements (
-         id, character_id, operation_type, operation_key, source_reference, item_id, quantity, created_at
-       )
-       VALUES ($1, $2, 'SPLIT_STACK', $3, $4, $5, $6, NOW())`,
-      [
-        randomUUID(),
-        input.characterId,
-        input.idempotencyKey,
-        `${input.fromSlot}->${input.toSlot}`,
-        fromItem.item_id,
-        input.quantity
-      ]
-    );
-
-    await client.query('COMMIT');
-
-    const inventory = await getCharacterInventory(pool, input.characterId);
-    return {
-      status: 'SUCCESS',
-      inventory,
-      idempotentReplay: false
-    };
-  } catch (err) {
-    try {
-      await client.query('ROLLBACK');
-    } catch {
-      // Ignore
-    }
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
 }

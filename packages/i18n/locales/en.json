@@ -250,6 +250,7 @@
   "error.rewardAlreadyClaimed": "Reward has already been claimed",
   "error.rewardNotFound": "Reward was not found",
   "error.characterNotFound": "Character was not found",
+  "error.idempotencyConflict": "Operation conflict: idempotency key used with different parameters",
   "error.forbidden": "Forbidden",
   "inventory.title": "Inventory",
   "inventory.rewardInboxTitle": "AFK Reward Inbox",

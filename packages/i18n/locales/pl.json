@@ -250,6 +250,7 @@
   "error.rewardAlreadyClaimed": "Nagroda została już odebrana",
   "error.rewardNotFound": "Nagroda nie została odnaleziona",
   "error.characterNotFound": "Postać nie została znaleziona",
+  "error.idempotencyConflict": "Konflikt operacji: klucz idempotencji użyty z innymi parametrami",
   "error.forbidden": "Brak uprawnień",
   "inventory.title": "Ekwipunek",
   "inventory.rewardInboxTitle": "Magazyn nagród AFK",
